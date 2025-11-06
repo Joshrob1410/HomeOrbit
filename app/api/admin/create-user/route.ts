@@ -41,7 +41,8 @@ export async function POST(req: NextRequest) {
     // TODO: add your company/home/role inserts using role, company_id, etc.
 
     return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Failed' }, { status: 500 });
-  }
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e ?? 'Failed');
+        return NextResponse.json({ error: message }, { status: 500 });
+    }
 }
