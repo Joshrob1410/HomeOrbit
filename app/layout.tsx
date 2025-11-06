@@ -1,6 +1,8 @@
 ﻿import "./globals.css";
 import type { Metadata } from "next";
-import type { ReactNode } from "react";
+import type { ReactNode } from 'react';
+import { cookies } from 'next/headers';
+import ThemeCSSBridge from 'app/(app)/_components/ThemeCSSBridge';
 import { Geist, Geist_Mono } from "next/font/google";
 
 // Fonts
@@ -23,12 +25,17 @@ export const metadata: Metadata = safeBase
       description: "HomeOrbit – home management.",
     };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
-  return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        {children}
-      </body>
-    </html>
-  );
+export default async function RootLayout({ children }: { children: ReactNode }) {
+    // ✅ Await the promise, then read the cookie safely
+    const cookieStore = await cookies();
+    const isOrbit = (cookieStore.get('orbit')?.value ?? '0') === '1';
+
+    return (
+        <html lang="en" data-orbit={isOrbit ? '1' : '0'}>
+            <body style={{ background: 'var(--page-bg)', color: 'var(--ink)' }}>
+                <ThemeCSSBridge initialOrbit={isOrbit} />
+                {children}
+            </body>
+        </html>
+    );
 }
