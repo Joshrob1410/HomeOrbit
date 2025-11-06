@@ -171,9 +171,37 @@ export default async function Sidebar({ orbitInitial }: { orbitInitial: boolean 
     const isCompany = level === '2_COMPANY';
     const isManager = level === '3_MANAGER';
 
-    const showManagement = isAdmin || isCompany || isManager;
-    const showBudgets = !bankOnly;
-    const showAppointments = !bankOnly;
+    // --- NEW: company feature flags (default TRUE; admins bypass) ---
+    type AppFeature =
+        | 'TRAINING' | 'BOOKINGS' | 'ROTAS' | 'TIMESHEETS' | 'ANNUAL_LEAVE'
+        | 'BUDGETS' | 'SUPERVISIONS' | 'PAYSLIPS' | 'APPOINTMENTS'
+        | 'POLICIES' | 'MANAGEMENT' | 'LICENSES';
+
+    const featureMap = new Map<AppFeature, boolean>();
+
+    if (!isAdmin) {
+        const { data: companyIds } = await supabase.rpc('user_company_ids'); // returns uuid[]
+        const companyId: string | null =
+            Array.isArray(companyIds) && companyIds.length ? companyIds[0] : null;
+
+        if (companyId) {
+            const { data: rows } = await supabase
+                .from('company_features_effective_v')
+                .select('feature,is_enabled')
+                .eq('company_id', companyId);
+
+            for (const r of rows ?? []) {
+                featureMap.set(r.feature as AppFeature, !!r.is_enabled);
+            }
+        }
+    }
+
+    const featureOn = (f: AppFeature) => (isAdmin ? true : (featureMap.get(f) ?? true));
+
+    // old booleans rewritten to respect flags:
+    const showManagement = (isAdmin || isCompany || isManager) && featureOn('MANAGEMENT');
+    const showBudgets = !bankOnly && featureOn('BUDGETS');
+    const showAppointments = !bankOnly && featureOn('APPOINTMENTS');
 
     return (
         <aside
@@ -236,22 +264,24 @@ export default async function Sidebar({ orbitInitial }: { orbitInitial: boolean 
                 {/* Navigation */}
                 <nav className="px-4 pb-6 space-y-6 text-[13px]">
                     <Section title="My work" dark={dark}>
-                        <Item href="/training" label="Training" icon={<IconBook />} tone="indigo" dark={dark} />
-                        <Item href="/bookings" label="Training booking" icon={<IconCalendar />} tone="violet" dark={dark} />
-                        <Item href="/rotas" label="Rotas" icon={<IconRota />} tone="fuchsia" dark={dark} />
-                        <Item href="/timesheets" label="Timesheets" icon={<IconClock />} tone="cyan" dark={dark} />
-                        <Item href="/annual-leave" label="Annual leave" icon={<IconLeave />} tone="rose" dark={dark} />
+                        {featureOn('TRAINING') && <Item href="/training" label="Training" icon={<IconBook />} tone="indigo" dark={dark} />}
+                        {featureOn('BOOKINGS') && <Item href="/bookings" label="Training booking" icon={<IconCalendar />} tone="violet" dark={dark} />}
+                        {featureOn('ROTAS') && <Item href="/rotas" label="Rotas" icon={<IconRota />} tone="fuchsia" dark={dark} />}
+                        {featureOn('TIMESHEETS') && <Item href="/timesheets" label="Timesheets" icon={<IconClock />} tone="cyan" dark={dark} />}
+                        {featureOn('ANNUAL_LEAVE') && <Item href="/annual-leave" label="Annual leave" icon={<IconLeave />} tone="rose" dark={dark} />}
                         {showBudgets && <Item href="/budgets" label="Budgets" icon={<IconBudget />} tone="emerald" dark={dark} />}
-                        <Item href="/supervisions" label="Supervisions" icon={<IconSupervision />} tone="sky" dark={dark} />
-                        <Item href="/payslips" label="Payslips" icon={<IconPayslip />} tone="teal" dark={dark} />
+                        {featureOn('SUPERVISIONS') && <Item href="/supervisions" label="Supervisions" icon={<IconSupervision />} tone="sky" dark={dark} />}
+                        {featureOn('PAYSLIPS') && <Item href="/payslips" label="Payslips" icon={<IconPayslip />} tone="teal" dark={dark} />}
                         {showAppointments && <Item href="/appointments" label="Appointments" icon={<IconAppointment />} tone="amber" dark={dark} />}
-                        <Item href="/policies" label="Policies" icon={<IconPolicy />} tone="slate" dark={dark} />
+                        {featureOn('POLICIES') && <Item href="/policies" label="Policies" icon={<IconPolicy />} tone="slate" dark={dark} />}
                     </Section>
 
                     {showManagement && (
                         <Section title="Management" dark={dark}>
                             <Item href="/Management" label="Management" icon={<IconOrg />} tone="indigo" dark={dark} />
-                            {isAdmin && <Item href="/licenses" label="Licenses" icon={<IconLicense />} tone="violet" dark={dark} />}
+                            {isAdmin && featureOn('LICENSES') && (
+                                <Item href="/licenses" label="Licenses" icon={<IconLicense />} tone="violet" dark={dark} />
+                            )}
                         </Section>
                     )}
                 </nav>

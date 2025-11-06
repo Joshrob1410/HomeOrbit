@@ -52,7 +52,18 @@ export default function TrainingPage() {
         })();
     }, []);
 
+    type Company = { id: string; name: string };
+
     const isAdmin = level === '1_ADMIN';
+    const [myCompanyId, setMyCompanyId] = useState<string>('');     // non-admin’s company
+    const [companies, setCompanies] = useState<Company[]>([]);     // admin: list all companies
+    const [filterCompanyId, setFilterCompanyId] = useState<string>(''); // admin selection
+
+    // Single source of truth: which company the Team/Compliance queries should use
+    const companyContextId = useMemo(
+        () => (isAdmin ? (filterCompanyId || companies[0]?.id || '') : myCompanyId),
+        [isAdmin, filterCompanyId, companies, myCompanyId],
+    )
     const isCompany = level === '2_COMPANY';
     const isManager = level === '3_MANAGER';
 
@@ -2113,6 +2124,36 @@ function TeamTraining({ isAdmin, isCompany }: { isAdmin: boolean; isCompany: boo
 
     return (
         <div className="space-y-4" style={{ color: 'var(--ink)' }}>
+            {/* Company scope (admins only) */}
+            {isAdmin && (
+                <div>
+                    <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                        Company
+                    </label>
+                    <select
+                        className="w-full max-w-sm rounded-lg px-3 py-2 ring-1"
+                        style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                        value={companyId}
+                        onChange={(e) => {
+                            const v = e.target.value;
+                            setCompanyId(v);
+                            // optional: clear filters when switching companies
+                            setHomeId('');
+                            setSearch('');
+                            setStatus('ALL');
+                            setHasCert('ALL');
+                            setMandatory('ALL');
+                        }}
+                    >
+                        {companies.map((c) => (
+                            <option key={c.id} value={c.id}>
+                                {c.name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            )}
+
             {/* Secondary tabs (match payslips style) */}
             <div className="flex gap-2">
                 <TabBtn active={subTab === 'TEAM'} onClick={() => setSubTab('TEAM')}>
@@ -2122,6 +2163,7 @@ function TeamTraining({ isAdmin, isCompany }: { isAdmin: boolean; isCompany: boo
                     Compliance
                 </TabBtn>
             </div>
+
 
             {/* TEAM TAB */}
             {subTab === 'TEAM' && (

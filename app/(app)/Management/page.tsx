@@ -1,7 +1,7 @@
 'use client';
 
 import type React from 'react';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/supabase/client';
 import { getEffectiveLevel, type AppLevel } from '@/supabase/roles';
@@ -123,41 +123,36 @@ function Tabbed({
     isCompany: boolean;
     isManager: boolean;
 }) {
-    type Tab = 'PEOPLE' | 'HOMES' | 'COMPANIES';
+    type Tab = 'PEOPLE' | 'HOMES' | 'COMPANIES' | 'FEATURES';
     const [tab, setTab] = useState<Tab>('PEOPLE');
 
     const showHomes = isAdmin || isCompany;
     const showCompanies = isAdmin;
+    const showFeatures = isAdmin; // feature toggles are admin-only
 
     return (
         <div className="space-y-4">
-            <div
-                className="inline-flex rounded-lg overflow-hidden"
-                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', boxShadow: 'none' }}
-            >
-                <TabBtn active={tab === 'PEOPLE'} onClick={() => setTab('PEOPLE')}>
-                    People
-                </TabBtn>
+            <div className="inline-flex rounded-lg overflow-hidden" style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', boxShadow: 'none' }}>
+                <TabBtn active={tab === 'PEOPLE'} onClick={() => setTab('PEOPLE')}>People</TabBtn>
                 {showHomes && (
-                    <TabBtn active={tab === 'HOMES'} onClick={() => setTab('HOMES')}>
-                        Homes
-                    </TabBtn>
+                    <TabBtn active={tab === 'HOMES'} onClick={() => setTab('HOMES')}>Homes</TabBtn>
                 )}
                 {showCompanies && (
-                    <TabBtn active={tab === 'COMPANIES'} onClick={() => setTab('COMPANIES')}>
-                        Companies
-                    </TabBtn>
+                    <TabBtn active={tab === 'COMPANIES'} onClick={() => setTab('COMPANIES')}>Companies</TabBtn>
+                )}
+                {showFeatures && (
+                    <TabBtn active={tab === 'FEATURES'} onClick={() => setTab('FEATURES')}>Features</TabBtn>
                 )}
             </div>
 
-            {tab === 'PEOPLE' && (
-                <PeopleTab isAdmin={isAdmin} isCompany={isCompany} isManager={isManager} />
-            )}
+            {tab === 'PEOPLE' && (<PeopleTab isAdmin={isAdmin} isCompany={isCompany} isManager={isManager} />)}
             {tab === 'HOMES' && showHomes && <HomesTab isAdmin={isAdmin} isCompany={isCompany} />}
             {tab === 'COMPANIES' && showCompanies && <CompaniesTab />}
+            {tab === 'FEATURES' && showFeatures && <FeaturesTab />}
         </div>
     );
 }
+
 
 function TabBtn(
     {
@@ -222,11 +217,6 @@ function PeopleTab({
     const [filterHome, setFilterHome] = useState<string>('');
     const [loading, setLoading] = useState(false);
 
-    // Create form
-    const [creating, setCreating] = useState(false);
-    const [role, setRole] = useState<AppLevel>('4_STAFF'); // app-level
-    const [isAdminRole, setIsAdminRole] = useState(false);
-
     // role-driven UI
     const [position, setPosition] = useState<string>(''); // STAFF: RESIDENTIAL|TEAM_LEADER|BANK ; MANAGER: MANAGER|DEPUTY_MANAGER
     const [companyPositions, setCompanyPositions] = useState<string[]>([]); // COMPANY only
@@ -236,10 +226,34 @@ function PeopleTab({
     const [createHomeId, setCreateHomeId] = useState<string>('');
     const [createManagerHomeIds, setCreateManagerHomeIds] = useState<string[]>([]);
 
+    // Create form
+    const [creating, setCreating] = useState(false);
+    const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+    const [role, setRole] = useState<AppLevel>('4_STAFF');
+    const [isAdminRole, setIsAdminRole] = useState(false);
+
     // new user fields
     const [fullName, setFullName] = useState('');
     const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
+
+    // PeopleTab state (add this)
+    type VerifyStatus = 'pending' | 'verified';
+    const [verifyMap, setVerifyMap] = useState<Record<string, VerifyStatus>>({});
+
+
+    useEffect(() => {
+        (async () => {
+            if (!rows.length) return;
+            const ids = Array.from(new Set(rows.map(r => r.user_id)));
+            const res = await authFetch('/api/admin/auth-status?ids=' + ids.join(','));
+            if (res.ok) {
+                const map = await res.json();
+                setVerifyMap(map as Record<string, 'pending' | 'verified'>);
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rows]);
+
 
     // under the other useState hooks
     const [search, setSearch] = useState('');
@@ -481,39 +495,33 @@ function PeopleTab({
     async function createPerson(e: React.FormEvent) {
         e.preventDefault();
         setCreating(true);
+        setInviteMsg(null);
         try {
-            if (!fullName || !email) throw new Error('Name and email are required');
+            if (!fullName.trim() || !email.trim()) throw new Error('Name and email are required');
 
             const isManagerManager = !isAdminRole && role === '3_MANAGER' && position === 'MANAGER';
 
-            // put these minimal types near the top of the component (or above createPerson)
-            type CreatePosition = '' | 'BANK' | 'RESIDENTIAL' | 'TEAM_LEADER' | 'MANAGER' | 'DEPUTY_MANAGER';
+            type CreatePosition =
+                | '' | 'BANK' | 'RESIDENTIAL' | 'TEAM_LEADER' | 'MANAGER' | 'DEPUTY_MANAGER';
 
             type CreateUserPayload = {
                 full_name: string;
                 email: string;
-                password?: string;
-                role: AppLevel; // "1_ADMIN" | "2_COMPANY" | "3_MANAGER" | "4_STAFF"
+                role: AppLevel;
                 company_id: string | null;
-                home_id: string | null; // null when manager with multiple homes or bank/no fixed home
-                manager_home_ids?: string[]; // only when role is manager=MANAGER (multi-home)
+                home_id: string | null;
+                manager_home_ids?: string[];
                 position: CreatePosition;
-                company_positions: string[]; // used for company-level role extras
+                company_positions: string[];
             };
 
             const payload: CreateUserPayload = {
-                full_name: fullName,
-                email,
-                ...(password ? { password } : {}),
+                full_name: fullName.trim(),
+                email: email.trim(),
                 role: (isAdminRole ? '1_ADMIN' : role) as AppLevel,
-                company_id: isAdmin ? createCompanyId || null : myCompanyId || null,
-
-                // single-home for Staff/Deputy; null for Manager=MANAGER to signal multi-home
-                home_id: isManagerManager ? null : createHomeId || null,
-
-                // only include when truly a multi-home manager
+                company_id: isAdmin ? (createCompanyId || null) : (myCompanyId || null),
+                home_id: isManagerManager ? null : (createHomeId || null),
                 ...(isManagerManager ? { manager_home_ids: createManagerHomeIds } : {}),
-
                 position: position as CreatePosition,
                 company_positions: companyPositions,
             };
@@ -522,34 +530,39 @@ function PeopleTab({
                 method: 'POST',
                 body: JSON.stringify(payload),
             });
-            if (!res.ok) throw new Error((await res.json())?.error || 'Failed to create user');
+            if (!res.ok) throw new Error((await res.json())?.error || 'Failed to send invite');
 
+            // reset form
             setFullName('');
             setEmail('');
-            setPassword('');
             setPosition('');
             setCompanyPositions([]);
             setIsAdminRole(false);
+            setCreateHomeId('');
+            setCreateManagerHomeIds([]);
+
+            setInviteMsg('Invite sent. They’ll appear as “Pending verification” until they verify.');
             await resetAndLoad();
         } catch (err) {
-            if (err instanceof Error) {
-                // eslint-disable-next-line no-alert
-                alert(err.message);
-            } else {
-                // eslint-disable-next-line no-alert
-                alert('Failed');
-            }
+            alert(err instanceof Error ? err.message : 'Failed');
         } finally {
             setCreating(false);
         }
     }
 
-    function randomPassword() {
-        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-        let out = '';
-        for (let i = 0; i < 12; i++) out += chars[Math.floor(Math.random() * chars.length)];
-        setPassword(out);
+    async function resendInvite(user_id: string) {
+        const res = await authFetch('/api/admin/people/resend-invite', {
+            method: 'POST',
+            body: JSON.stringify({ user_id }),
+        });
+        if (!res.ok) {
+            const j = (await res.json().catch(() => ({}))) as { error?: string };
+            alert(j?.error || 'Failed to resend invite');
+        } else {
+            alert('Invite re-sent.');
+        }
     }
+
 
     const companyIdContext = isAdmin
         ? filterCompany || createCompanyId || myCompanyId || ''
@@ -572,7 +585,7 @@ function PeopleTab({
                 style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
             >
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
-                    Create person
+                    Invite a person
                 </h2>
                 <form onSubmit={createPerson} className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div>
@@ -598,28 +611,20 @@ function PeopleTab({
                             onChange={(e) => setEmail(e.target.value)}
                         />
                     </div>
-                    <div>
-                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
-                            Password
-                        </label>
-                        <div className="mt-1 flex gap-2">
-                            <input
-                                className="flex-1 rounded-md px-2 py-2 ring-1 text-sm"
-                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                placeholder="(optional)"
-                            />
-                            <button
-                                type="button"
-                                onClick={randomPassword}
-                                className="rounded-md px-3 text-sm ring-1 transition"
-                                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                            >
-                                Generate
-                            </button>
-                        </div>
+                    {/* (Delete the entire password + strength UI block) */}
+
+                    <div className="md:col-span-3">
+                        <span className="ml-3 text-[12px]" style={{ color: 'var(--sub)' }}>
+                            We’ll email them a link to verify and set their password.
+                        </span>
+
+                        {inviteMsg && (
+                            <div className="mt-2 text-[12px]" style={{ color: 'var(--sub)' }}>
+                                {inviteMsg}
+                            </div>
+                        )}
                     </div>
+
 
                     {/* Role FIRST — drives position UI */}
                     <div>
@@ -796,14 +801,15 @@ function PeopleTab({
                         <button
                             className="rounded-md px-3 py-2 text-sm ring-1 transition"
                             style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                            disabled={creating}
+                            disabled={creating || !fullName.trim() || !email.trim()}
                         >
-                            {creating ? 'Creating…' : 'Create person'}
+                            {creating ? 'Sending invite…' : 'Send invite'}
                         </button>
                         <span className="ml-3 text-[12px]" style={{ color: 'var(--sub)' }}>
-                            Creation calls /api/admin/create-user.
+                            We’ll email them a link to verify and set their password.
                         </span>
                     </div>
+
                 </form>
             </section>
 
@@ -878,6 +884,8 @@ function PeopleTab({
                             isCompany={isCompany}
                             isManager={isManager}
                             companyIdContext={companyIdContext}
+                            verifyStatus={verifyMap[r.user_id]}          // NEW
+                            onResendInvite={() => resendInvite(r.user_id)} // NEW
                             onAfterSave={resetAndLoad}
                         />
                     ))}
@@ -906,14 +914,8 @@ function PeopleTab({
 }
 
 function PersonRow({
-    row,
-    homes,
-    companies,
-    isAdmin,
-    isCompany,
-    isManager,
-    companyIdContext,
-    onAfterSave,
+    row, homes, companies, isAdmin, isCompany, isManager, companyIdContext, onAfterSave,
+    verifyStatus, onResendInvite,
 }: {
     row: { user_id: string; full_name: string; home_id: string | null; is_bank: boolean };
     homes: Home[];
@@ -923,6 +925,8 @@ function PersonRow({
     isManager: boolean;
     companyIdContext: string;
     onAfterSave?: () => Promise<void> | void;
+    verifyStatus?: 'pending' | 'verified';       // NEW
+    onResendInvite?: () => void;                  // NEW
 }) {
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -1331,7 +1335,10 @@ function PersonRow({
                                         : '—'}
                             </div>
                         </div>
-                        {chipText ? <RoleChip text={chipText} tone={chipTone} /> : null}
+                        <div className="flex gap-2">
+                            {chipText ? <RoleChip text={chipText} tone={chipTone} /> : null}
+                            {verifyStatus === 'pending' && <RoleChip text="Pending verification" tone="company" />}
+                        </div>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1529,13 +1536,24 @@ function PersonRow({
                 )}
             </div>
             {!editing ? (
-                <button
-                    onClick={handleEditClick}
-                    className="rounded-md px-3 py-2 text-sm ring-1 transition"
-                    style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                >
-                    Edit
-                </button>
+                <div className="flex items-center gap-2">
+                    {verifyStatus === 'pending' && (
+                        <button
+                            onClick={onResendInvite}
+                            className="rounded-md px-3 py-2 text-sm ring-1 transition"
+                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                        >
+                            Resend invite
+                        </button>
+                    )}
+                    <button
+                        onClick={handleEditClick}
+                        className="rounded-md px-3 py-2 text-sm ring-1 transition"
+                        style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                    >
+                        Edit
+                    </button>
+                </div>
             ) : (
                 <div className="flex items-center gap-2">
                     <button
@@ -1640,6 +1658,268 @@ function RoleChip({
         </span>
     );
 }
+
+function FeaturesTab() {
+    // Local types are scoped to this component to avoid collisions
+    type AppFeature =
+        | 'TRAINING' | 'BOOKINGS' | 'ROTAS' | 'TIMESHEETS' | 'ANNUAL_LEAVE'
+        | 'BUDGETS' | 'SUPERVISIONS' | 'PAYSLIPS' | 'APPOINTMENTS'
+        | 'POLICIES' | 'MANAGEMENT' | 'LICENSES';
+
+    type EffectiveRow = {
+        feature: AppFeature;
+        is_enabled: boolean;
+        updated_at: string | null;
+        updated_by: string | null;
+    };
+
+    type EffectiveMap = Partial<Record<AppFeature, boolean>>;
+
+    const [loading, setLoading] = useState(true);
+    const [companies, setCompanies] = useState<Company[]>([]);
+    const [companyId, setCompanyId] = useState<string>('');
+    const [features, setFeatures] = useState<AppFeature[]>([]);
+    const [effective, setEffective] = useState<EffectiveMap>({});
+    const [savingKey, setSavingKey] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [message, setMessage] = useState<string | null>(null);
+
+    // Helpers
+    const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+    // Fetch companies (admin sees all)
+    async function loadCompanies() {
+        const { data, error } = await supabase
+            .from('companies')
+            .select('id,name')
+            .order('name', { ascending: true });
+
+        if (error) throw error;
+        setCompanies((data ?? []) as Company[]);
+        if (!companyId && data?.[0]?.id) setCompanyId(data[0].id);
+    }
+
+    // Fetch enum list via RPC
+    async function loadFeatureList() {
+        const { data, error } = await supabase.rpc('app_features');
+        if (error) throw error;
+        setFeatures((data ?? []) as AppFeature[]);
+    }
+
+    // Fetch effective grid for a company
+    async function loadEffectiveForCompany(cid: string) {
+        if (!cid) return;
+        const { data, error } = await supabase
+            .from('company_features_effective_v')
+            .select('feature,is_enabled,updated_at,updated_by')
+            .eq('company_id', cid);
+
+        if (error) throw error;
+
+        const map: EffectiveMap = {};
+        const rows = (data ?? []) as EffectiveRow[];
+        for (const row of rows) {
+            map[row.feature] = !!row.is_enabled;
+        }
+        setEffective(map);
+    }
+
+    useEffect(() => {
+        (async () => {
+            try {
+                setLoading(true);
+                await Promise.all([loadCompanies(), loadFeatureList()]);
+            } catch (e: unknown) {
+                setError(errMsg(e) || 'Failed to load');
+            } finally {
+                setLoading(false);
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        if (!companyId) return;
+        (async () => {
+            try {
+                setLoading(true);
+                await loadEffectiveForCompany(companyId);
+            } catch (e: unknown) {
+                setError(errMsg(e) || 'Failed to load features');
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, [companyId]);
+
+    const sortedFeatures = useMemo(() => {
+        const order: AppFeature[] = [
+            'TRAINING', 'BOOKINGS', 'ROTAS', 'TIMESHEETS', 'ANNUAL_LEAVE',
+            'BUDGETS', 'SUPERVISIONS', 'PAYSLIPS', 'APPOINTMENTS',
+            'POLICIES', 'MANAGEMENT', 'LICENSES'
+        ];
+        return order.filter((f) => features.includes(f));
+    }, [features]);
+
+    async function toggleFeature(f: AppFeature, next: boolean) {
+        if (!companyId) return;
+        setSavingKey(`${companyId}:${f}`);
+        setMessage(null);
+        setError(null);
+
+        // optimistic update
+        setEffective((prev) => ({ ...prev, [f]: next }));
+
+        // Upsert a single row; RLS allows only admins to write
+        const { error } = await supabase
+            .from('company_features')
+            .upsert(
+                { company_id: companyId, feature: f, is_enabled: next },
+                { onConflict: 'company_id,feature' }
+            );
+
+        setSavingKey(null);
+        if (error) {
+            setError(error.message);
+            // rollback optimistic change
+            setEffective((prev) => ({ ...prev, [f]: !next }));
+        } else {
+            setMessage('Saved.');
+        }
+    }
+
+    async function resetToDefaults() {
+        if (!companyId) return;
+        setSavingKey(`${companyId}:__reset__`);
+        setMessage(null);
+        setError(null);
+
+        // Remove all explicit rows — defaults (TRUE) will apply via the view
+        const { error } = await supabase
+            .from('company_features')
+            .delete()
+            .eq('company_id', companyId);
+
+        setSavingKey(null);
+        if (error) {
+            setError(error.message);
+        } else {
+            await loadEffectiveForCompany(companyId);
+            setMessage('Reset to defaults.');
+        }
+    }
+
+    const labelFor = (f: AppFeature): string => {
+        switch (f) {
+            case 'TRAINING': return 'Training';
+            case 'BOOKINGS': return 'Training booking';
+            case 'ROTAS': return 'Rotas';
+            case 'TIMESHEETS': return 'Timesheets';
+            case 'ANNUAL_LEAVE': return 'Annual leave';
+            case 'BUDGETS': return 'Budgets';
+            case 'SUPERVISIONS': return 'Supervisions';
+            case 'PAYSLIPS': return 'Payslips';
+            case 'APPOINTMENTS': return 'Appointments';
+            case 'POLICIES': return 'Policies';
+            case 'MANAGEMENT': return 'Management';
+            case 'LICENSES': return 'Licenses';
+        }
+    };
+
+    const descFor = (f: AppFeature): string => {
+        switch (f) {
+            case 'TRAINING': return 'Show the Training module in the sidebar';
+            case 'BOOKINGS': return 'Allow session booking & invites';
+            case 'ROTAS': return 'Show Rotas in the sidebar';
+            case 'TIMESHEETS': return 'Enable Timesheets';
+            case 'ANNUAL_LEAVE': return 'Enable Annual Leave';
+            case 'BUDGETS': return 'Show Budgets to eligible roles';
+            case 'SUPERVISIONS': return 'Enable Supervisions';
+            case 'PAYSLIPS': return 'Access to Payslips';
+            case 'APPOINTMENTS': return 'Appointments page/link';
+            case 'POLICIES': return 'Policies link';
+            case 'MANAGEMENT': return 'Show Management section';
+            case 'LICENSES': return 'Licenses admin link (admins only)';
+        }
+    };
+
+    return (
+        <section className="rounded-lg p-4 ring-1" style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}>
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                Feature toggles
+            </h2>
+            <p className="text-xs mt-1" style={{ color: 'var(--sub)' }}>
+                Enable/disable sidebar features per company. No rows = defaults (enabled).
+            </p>
+
+            <div className="mt-4 flex gap-3 items-center">
+                <label htmlFor="features-company" className="text-sm" style={{ color: 'var(--ink)' }}>
+                    Company
+                </label>
+                <select
+                    id="features-company"
+                    className="rounded-lg border px-3 py-2 text-sm"
+                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                    value={companyId}
+                    onChange={(e) => setCompanyId(e.target.value)}
+                >
+                    {companies.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                </select>
+
+                <button
+                    className="ml-auto rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                    onClick={resetToDefaults}
+                    disabled={!companyId || savingKey === `${companyId}:__reset__`}
+                    title="Remove all explicit rows for this company"
+                >
+                    {savingKey === `${companyId}:__reset__` ? 'Resetting…' : 'Reset to defaults'}
+                </button>
+            </div>
+
+            {loading ? (
+                <div className="mt-6 text-sm" style={{ color: 'var(--sub)' }}>Loading…</div>
+            ) : (
+                <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {sortedFeatures.map((f) => {
+                        const checked = effective[f] ?? true; // default to ON
+                        const isSaving = savingKey === `${companyId}:${f}`;
+                        return (
+                            <label
+                                key={f}
+                                className="flex items-center justify-between rounded-xl border p-4 hover:bg-muted/40"
+                                style={{ borderColor: 'var(--ring)', background: 'var(--nav-item-bg)', color: 'var(--ink)' }}
+                            >
+                                <div className="flex flex-col">
+                                    <span className="font-medium">{labelFor(f)}</span>
+                                    <span className="text-xs" style={{ color: 'var(--sub)' }}>{descFor(f)}</span>
+                                </div>
+
+                                <input
+                                    type="checkbox"
+                                    className="h-5 w-5"
+                                    checked={checked}
+                                    onChange={(e) => toggleFeature(f, e.target.checked)}
+                                    disabled={isSaving}
+                                />
+                            </label>
+                        );
+                    })}
+                </div>
+            )}
+
+            {(message || error) && (
+                <div className="mt-4 text-sm">
+                    {message && <span className="text-emerald-600">{message}</span>}
+                    {error && <span className="text-rose-600">{error}</span>}
+                </div>
+            )}
+        </section>
+    );
+}
+
 
 /* =====================
    HOMES TAB
