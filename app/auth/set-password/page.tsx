@@ -1,55 +1,98 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/supabase/client';
 
 export default function SetPassword() {
-  const [pw, setPw] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [ready, setReady] = useState(false);
   const router = useRouter();
-  const qp = useSearchParams();
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    // If the invite link successfully authenticated them, we have a session.
-    // If we don't, send them to login to avoid a confusing dead end.
-    supabase.auth.getSession().then(({ data }) => {
-      if (!data.session) router.replace('/auth/login?reason=invite');
-      else setReady(true);
-    });
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) {
+        router.replace('/auth/login?error=session_required');
+        return;
+      }
+      setLoading(false);
+    })();
   }, [router]);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (pw.length < 8) return;
+    setErr(null);
+
+    if (!pw || pw.length < 8) {
+      setErr('Password must be at least 8 characters.');
+      return;
+    }
+    if (pw !== pw2) {
+      setErr('Passwords do not match.');
+      return;
+    }
+
     setSaving(true);
     const { error } = await supabase.auth.updateUser({ password: pw });
     setSaving(false);
-    if (error) return alert(error.message);
 
-    // Optionally clear ?from=invite and go to dashboard
+    if (error) {
+      setErr(error.message);
+      return;
+    }
+
     router.replace('/dashboard');
   }
 
-  if (!ready) return null;
+  if (loading) {
+    return <div className="p-5 text-sm" style={{ color: 'var(--ink)' }}>Checking session…</div>;
+  }
 
   return (
-    <form onSubmit={onSubmit} className="max-w-sm space-y-3">
-      <h1 className="text-lg font-semibold">Set your password</h1>
-      <input
-        type="password"
-        className="w-full rounded-md px-3 py-2 ring-1"
-        placeholder="New password (min 8)"
-        value={pw}
-        onChange={(e) => setPw(e.target.value)}
-      />
-      <button
-        className="rounded-md px-3 py-2 text-sm ring-1"
-        disabled={saving || pw.length < 8}
-      >
-        {saving ? 'Saving…' : 'Save password'}
-      </button>
-    </form>
+    <div className="p-6 max-w-md mx-auto">
+      <h1 className="text-lg font-semibold" style={{ color: 'var(--ink)' }}>Create your password</h1>
+      <p className="text-sm mt-1" style={{ color: 'var(--sub)' }}>
+        You’re almost done — set a password for your account.
+      </p>
+
+      <form onSubmit={submit} className="mt-4 space-y-3">
+        <div>
+          <label className="block text-sm" style={{ color: 'var(--ink)' }}>New password</label>
+          <input
+            type="password"
+            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            placeholder="••••••••"
+          />
+        </div>
+        <div>
+          <label className="block text-sm" style={{ color: 'var(--ink)' }}>Confirm password</label>
+          <input
+            type="password"
+            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+            value={pw2}
+            onChange={(e) => setPw2(e.target.value)}
+            placeholder="••••••••"
+          />
+        </div>
+
+        {err && <div className="text-sm text-rose-500">{err}</div>}
+
+        <button
+          className="rounded-md px-3 py-2 text-sm ring-1 transition"
+          style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+          disabled={saving}
+        >
+          {saving ? 'Saving…' : 'Save password'}
+        </button>
+      </form>
+    </div>
   );
 }

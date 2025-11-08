@@ -240,6 +240,19 @@ function PeopleTab({
     type VerifyStatus = 'pending' | 'verified';
     const [verifyMap, setVerifyMap] = useState<Record<string, VerifyStatus>>({});
 
+    // NEW: guards against stale responses when filters change fast
+    const loadSeq = useRef(0);
+
+    // UPDATE: whenever you restart the list, bump the token
+    async function resetAndLoad() {
+        const token = ++loadSeq.current;
+        setRows([]);
+        setVerifyMap({}); // clear verification statuses too
+        setNextFrom(0);
+        await loadMore(0, token);
+    }
+
+
 
     useEffect(() => {
         (async () => {
@@ -376,12 +389,6 @@ function PeopleTab({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [filterCompany, filterHome]);
 
-    async function resetAndLoad() {
-        setRows([]);
-        setNextFrom(0);
-        await loadMore(0);
-    }
-
     function uniqueByKey<T>(arr: T[], makeKey: (t: T) => string): T[] {
         const seen = new Set<string>();
         const out: T[] = [];
@@ -399,7 +406,8 @@ function PeopleTab({
     const rowKey = (r: { user_id: string; home_id: string | null; is_bank: boolean }) =>
         `${r.user_id}:${r.is_bank ? 'bank' : r.home_id ?? 'company'}`;
 
-    async function loadMore(from?: number | null) {
+    // NOTE: signature now accepts the token (defaults to current)
+    async function loadMore(from?: number | null, token = loadSeq.current) {
         if (loading) return;
         setLoading(true);
         try {
@@ -416,8 +424,10 @@ function PeopleTab({
             let base: PersonRecord[] = [];
 
             if (isAdmin) {
-                const cid = filterCompany || myCompanyId || createCompanyId || companies[0]?.id || null;
+                // Strict: only fetch when a company is explicitly selected
+                const cid = filterCompany || null;
                 if (!cid) {
+                    if (token !== loadSeq.current) return; // stale
                     setRows([]);
                     setNextFrom(null);
                     return;
@@ -426,7 +436,7 @@ function PeopleTab({
                     .rpc('list_company_people', { p_company_id: cid })
                     .range(f, f + PAGE_SIZE - 1);
                 if (error) throw error;
-                base = data || [];
+                base = (data ?? []) as PersonRecord[];
             } else if (isCompany) {
                 const { data: me } = await supabase.auth.getUser();
                 const userId = me.user?.id;
@@ -439,51 +449,52 @@ function PeopleTab({
                     .maybeSingle();
                 const cid = cm.data?.company_id ?? '';
                 if (!cid) return;
+
                 const { data, error } = await supabase
                     .rpc('list_company_people', { p_company_id: cid })
                     .range(f, f + PAGE_SIZE - 1);
                 if (error) throw error;
-                base = data || [];
+                base = (data ?? []) as PersonRecord[];
             } else if (isManager) {
                 const { data, error } = await supabase.rpc('list_manager_people');
                 if (error) throw error;
-                type PersonRecord = {
-                    user_id: string;
-                    full_name: string;
-                    home_id: string | null;
-                    is_bank: boolean;
-                };
-
                 base = (data ?? []) as PersonRecord[];
             }
 
+            // If a newer request started after we began, ignore this response
+            if (token !== loadSeq.current) return;
+
+            // Deduplicate across (user, scope) using your rowKey
             let list = uniqueByKey<PersonRecord>(base, rowKey);
 
-            // Prefer specific memberships (HOME/BANK) over company-only rows for the same user
+            // Prefer HOME/BANK over company-only for the same user
             const hasNonCompany = new Set<string>();
             for (const r of list) {
                 if (r.is_bank || r.home_id) hasNonCompany.add(r.user_id);
             }
-            list = list.filter((r) => r.is_bank || r.home_id || !hasNonCompany.has(r.user_id));
+            list = list.filter(r => r.is_bank || r.home_id || !hasNonCompany.has(r.user_id));
 
+            // Client-side filters
             if (filterHome) {
-                list = list.filter((r) =>
+                list = list.filter(r =>
                     filterHome === 'BANK'
                         ? r.is_bank
                         : filterHome === 'COMPANY'
-                            ? !r.is_bank && !r.home_id // company-level members (no home, not bank)
-                            : r.home_id === filterHome,
+                            ? !r.is_bank && !r.home_id
+                            : r.home_id === filterHome
                 );
             }
             if (search.trim()) {
                 const q = search.trim().toLowerCase();
-                list = list.filter((r) => (r.full_name || '').toLowerCase().includes(q));
+                list = list.filter(r => (r.full_name || '').toLowerCase().includes(q));
             }
 
-            setRows((prev) => {
-                const merged = [...prev, ...list];
-                return uniqueByKey<PersonRecord>(merged, rowKey);
-            });
+            // Replace list on first page; merge on subsequent pages
+            if ((f ?? 0) === 0) {
+                setRows(list);
+            } else {
+                setRows(prev => uniqueByKey<PersonRecord>([...prev, ...list], rowKey));
+            }
 
             if (base.length < PAGE_SIZE || isManager) setNextFrom(null);
             else setNextFrom((f ?? 0) + PAGE_SIZE);
@@ -491,6 +502,7 @@ function PeopleTab({
             setLoading(false);
         }
     }
+
 
     async function createPerson(e: React.FormEvent) {
         e.preventDefault();
@@ -611,20 +623,6 @@ function PeopleTab({
                             onChange={(e) => setEmail(e.target.value)}
                         />
                     </div>
-                    {/* (Delete the entire password + strength UI block) */}
-
-                    <div className="md:col-span-3">
-                        <span className="ml-3 text-[12px]" style={{ color: 'var(--sub)' }}>
-                            We’ll email them a link to verify and set their password.
-                        </span>
-
-                        {inviteMsg && (
-                            <div className="mt-2 text-[12px]" style={{ color: 'var(--sub)' }}>
-                                {inviteMsg}
-                            </div>
-                        )}
-                    </div>
-
 
                     {/* Role FIRST — drives position UI */}
                     <div>
