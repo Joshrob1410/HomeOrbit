@@ -76,10 +76,34 @@ export async function POST(req: NextRequest) {
     }
 
     // Helper to run RPCs safely
-    const callRpc = async (fn: string, args: Record<string, unknown>) => {
-      const { error } = await admin.rpc(fn, args as any);
-      if (error) throw new Error(`${fn} failed: ${error.message}`);
-    };
+      // --- put these near your other types ---
+      type CompanyPosition = 'OWNER' | 'FINANCE_OFFICER' | 'SITE_MANAGER';
+
+      type RpcMap = {
+          admin_set_company_position: {
+              p_user_id: string;
+              p_company_id: string;
+              p_position: CompanyPosition;
+              p_enable: boolean;
+          };
+          admin_set_manager_subrole: {
+              p_user_id: string;
+              p_home_id: string;
+              p_manager_subrole: 'MANAGER' | 'DEPUTY_MANAGER';
+          };
+          admin_set_staff_subrole: {
+              p_user_id: string;
+              p_home_id: string;
+              p_staff_subrole: 'RESIDENTIAL' | 'TEAM_LEADER';
+          };
+      };
+
+      // Strictly typed helper — no `any`
+      async function callRpc<K extends keyof RpcMap>(fn: K, args: RpcMap[K]) {
+          const { error } = await admin.rpc(String(fn), args);
+          if (error) throw new Error(`${String(fn)} failed: ${error.message}`);
+      }
+
 
     // COMPANY: ensure has_company_access + positions
     if (role === '2_COMPANY') {
