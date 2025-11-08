@@ -34,23 +34,23 @@ export default function Welcome() {
   const score = useMemo(() => strengthScore(pw), [pw]);
   const strongEnough = score >= 3 && pw === pw2;
 
-  useEffect(() => {
-    (async () => {
-      const { data: session } = await supabase.auth.getSession();
-      const uid = session.session?.user?.id;
-      if (!uid) {
-        router.replace('/auth/login');
-        return;
-      }
+    useEffect(() => {
+        (async () => {
+            const { data: { session } } = await supabase.auth.getSession();
+            const uid = session?.user?.id;
+            if (!uid) {
+                router.replace('/auth/login');
+                return;
+            }
 
-      // profile basics
-      setEmail(session.session.user.email ?? '');
-      const { data: prof } = await supabase
-        .from('profiles')
-        .select('full_name')
-        .eq('user_id', uid)
-        .maybeSingle();
-      setFullName(prof?.full_name ?? '');
+            // profile basics
+            setEmail(session?.user?.email ?? '');
+            const { data: prof } = await supabase
+                .from('profiles')
+                .select('full_name')
+                .eq('user_id', uid)
+                .maybeSingle();
+            setFullName(prof?.full_name ?? '');
 
       // company (if any)
       const { data: cm } = await supabase
@@ -104,7 +104,7 @@ export default function Welcome() {
 
       setLoading(false);
     })();
-  }, [router, company?.id]);
+    }, [router, company?.id]);
 
   async function savePassword() {
     if (!strongEnough) return;
