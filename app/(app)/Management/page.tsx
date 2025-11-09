@@ -383,11 +383,22 @@ function PeopleTab({
         })();
     }, [isAdmin, createCompanyId]);
 
+    // NEW: when you switch company, also clear the home filter so we never
+    // carry a home id from another company.
     useEffect(() => {
-        if (!filtersLiveRef.current) return; // ignore changes during initial boot
+        setFilterHome('');            // <— reset the dependent filter
+        if (!filtersLiveRef.current) return;
+        resetAndLoad();               // fetch first page with fresh token
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filterCompany]);
+
+    // keep this one for Home changes only
+    useEffect(() => {
+        if (!filtersLiveRef.current) return;
         resetAndLoad();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [filterCompany, filterHome]);
+    }, [filterHome]);
+
 
     function uniqueByKey<T>(arr: T[], makeKey: (t: T) => string): T[] {
         const seen = new Set<string>();
@@ -1151,6 +1162,11 @@ function PersonRow({
             setAppRole('4_STAFF');
             setPositionEdit('RESIDENTIAL');
             setHomeId(row.home_id);
+            return;
+        }
+        // NEW: company-only member (no home, not bank, not manager/deputy/team lead)
+        if (cm.data?.company_id) {
+            setAppRole('2_COMPANY');
         }
     }
 
@@ -1216,9 +1232,6 @@ function PersonRow({
             }
             if (canEditEmail && email.trim()) {
                 body.email = email.trim();
-            }
-            if (canEditPassword && password) {
-                body.password = password;
             }
 
             if (canChangeCompany && companyId) {
@@ -1353,35 +1366,35 @@ function PersonRow({
                                 />
                             </div>
                         )}
-                        {canEditEmail && (
-                            <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    Email (leave blank to keep)
-                                </label>
-                                <input
-                                    className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
-                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    placeholder="new-email@example.com"
-                                />
-                            </div>
-                        )}
-                        {canEditPassword && (
-                            <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    Password (leave blank to keep)
-                                </label>
-                                <input
-                                    type="password"
-                                    className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
-                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    placeholder="••••••••"
-                                />
-                            </div>
-                        )}
+                            {canEditEmail && (
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs" style={{ color: 'var(--ink)' }}>
+                                        Email
+                                    </label>
+                                    <div className="mt-1 flex gap-2">
+                                        <input
+                                            className="w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                            value={email}
+                                            onChange={(e) => setEmail(e.target.value)}
+                                            placeholder="user@example.com"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={sendPasswordReset}
+                                            className="rounded-md px-3 py-2 text-sm ring-1"
+                                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                            title="Email a password reset link to this address"
+                                            disabled={!email.trim()}
+                                        >
+                                            Send password reset
+                                        </button>
+                                    </div>
+                                    <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
+                                        We’ll email a reset link using your Supabase project’s mailer.
+                                    </p>
+                                </div>
+                            )}
                         {canChangeCompany && (
                             <div>
                                 <label className="block text-xs" style={{ color: 'var(--ink)' }}>
