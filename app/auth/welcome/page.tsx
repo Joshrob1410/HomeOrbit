@@ -1,15 +1,22 @@
+// app/auth/welcome/page.tsx
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/supabase/client';
 
 type CompanyRow = { id: string; name: string };
-type HomeMembership = {
-  home_id: string;
-  role: 'MANAGER' | 'STAFF' | null;
-  manager_subrole: 'MANAGER' | 'DEPUTY_MANAGER' | null;
-  staff_subrole: 'RESIDENTIAL' | 'TEAM_LEADER' | null;
+type CPPVRow = {
+  company_id: string;
+  user_id: string;
+  full_name: string | null;
+  has_company_access: boolean;
+  is_bank: boolean;
+  home_ids: string[] | null;
+  roles: (string | null)[] | null;             // text[]
+  staff_subroles: (('RESIDENTIAL' | 'TEAM_LEADER' | null))[] | null;
+  manager_subroles: (('MANAGER' | 'DEPUTY_MANAGER' | null))[] | null;
+  company_positions: string[] | null;          // enum text[]
 };
 
 function strengthScore(pw: string): number {
@@ -21,141 +28,168 @@ function strengthScore(pw: string): number {
   return score; // 0..4
 }
 
-export default function Welcome() {
+export default function WelcomePage() {
   const router = useRouter();
-  const search = useSearchParams();
+  const params = useSearchParams();
 
-  const [loading, setLoading] = useState(true);
+  const [phase, setPhase] = useState<'verifying' | 'loading' | 'ready' | 'error'>('verifying');
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const [company, setCompany] = useState<CompanyRow | null>(null);
-  const [roleLabel, setRoleLabel] = useState<string>('—');
+  const [roleLabel, setRoleLabel] = useState('—');
 
   const [pw, setPw] = useState('');
   const [pw2, setPw2] = useState('');
   const [saving, setSaving] = useState(false);
+
   const score = useMemo(() => strengthScore(pw), [pw]);
   const strongEnough = score >= 3 && pw === pw2;
 
+  // Guard against double-runs on fast refresh/navigation
+  const didVerify = useRef(false);
+
   useEffect(() => {
-    let cancelled = false;
-    const sub = supabase.auth.onAuthStateChange(async (_event, session) => {
-      // Any valid session -> proceed
-      if (!session?.user?.id || cancelled) return;
-      await loadUserAndData(session.user.id);
-      if (!cancelled) setLoading(false);
-    });
-
     (async () => {
-      // 1) Handle PKCE code param (Supabase sometimes sends ?code=...)
-      const code = search.get('code');
-      if (code) {
-        try {
-          await supabase.auth.exchangeCodeForSession(code);
-          // onAuthStateChange above will run next
-        } catch {
-          // If code exchange fails, fall through to normal check
+      try {
+        // 1) If we arrived from an invite email, Supabase gives us ?token_hash=&type=invite
+        const tokenHash = params.get('token_hash');
+        const t = params.get('type'); // usually 'invite', sometimes 'recovery'/'email_change'
+
+        // If the URL is the #access_token style (hash), supabase-js auto-extracts it on load.
+        // We still attempt verifyOtp ONLY if token_hash is present and we haven't tried yet.
+        if (tokenHash && !didVerify.current) {
+          didVerify.current = true;
+          const type = (t || 'invite') as
+            | 'invite'
+            | 'signup'
+            | 'magiclink'
+            | 'recovery'
+            | 'email_change';
+
+          const { error: verifyErr } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type,
+          });
+          if (verifyErr) {
+            // Common cause: already used/expired link
+            setErrMsg(verifyErr.message || 'This link is invalid or has already been used.');
+            setPhase('error');
+            return;
+          }
+
+          // Clean the URL (drop query params)
+          window.history.replaceState({}, '', '/auth/welcome');
         }
-      }
 
-      // 2) Immediate session check (covers hash-token magic link as well)
-      const { data: s1 } = await supabase.auth.getSession();
-      if (s1.session?.user?.id) {
-        await loadUserAndData(s1.session.user.id);
-        if (!cancelled) setLoading(false);
-        return;
-      }
+        setPhase('loading');
 
-      // 3) No session + no tokens visible -> gentle fallback to login
-      const hasHashTokens =
-        typeof window !== 'undefined' &&
-        window.location.hash &&
-        /access_token=|refresh_token=|type=/.test(window.location.hash);
+        // 2) Wait for a session (either from hash auto-extract or from verifyOtp)
+        const { data: sessRes } = await supabase.auth.getSession();
+        let sess = sessRes?.session ?? null;
 
-      if (!hasHashTokens && !code) {
-        if (!cancelled) {
-          setLoading(false);
-          router.replace('/auth/login?reason=missing-session');
+        if (!sess) {
+          // Give auth state a brief moment to propagate (covers hash-style)
+          const wait = await new Promise<boolean>((resolve) => {
+            const timeout = setTimeout(() => resolve(false), 1500);
+            const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+              if (s) {
+                clearTimeout(timeout);
+                sub.subscription.unsubscribe();
+                resolve(true);
+              }
+            });
+          });
+          if (wait) {
+            const { data: again } = await supabase.auth.getSession();
+            sess = again?.session ?? null;
+          }
         }
+
+        if (!sess) {
+          setErrMsg('We could not create your session. Please log in and try again.');
+          setPhase('error');
+          return;
+        }
+
+        // 3) Show email + basic name from profile
+        setEmail(sess.user.email ?? '');
+
+        // profiles.full_name is keyed by user_id (your schema) 
+        const prof = await supabase
+          .from('profiles')
+          .select('full_name')
+          .eq('user_id', sess.user.id)
+          .maybeSingle();
+
+        if (!prof.error && prof.data) {
+          setFullName((prof.data.full_name ?? '').trim());
+        }
+
+        // 4) Resolve company + position from your roster view
+        //    company_people_positions_v contains all role flags and positions per company for the user. 
+        const cpp = await supabase
+          .from('company_people_positions_v')
+          .select('company_id, user_id, full_name, has_company_access, is_bank, home_ids, roles, staff_subroles, manager_subroles, company_positions')
+          .eq('user_id', sess.user.id);
+
+        if (!cpp.error) {
+          const rows = (Array.isArray(cpp.data) ? cpp.data : []) as CPPVRow[];
+
+          // Prefer a row where user has company access or any membership;
+          // fall back to the first row if multiple.
+          const pick =
+            rows.find((r) => r.has_company_access) ??
+            rows.find((r) => (r.roles?.length ?? 0) > 0 || r.is_bank) ??
+            rows[0];
+
+          if (pick?.company_id) {
+            const co = await supabase
+              .from('companies')
+              .select('id,name')
+              .eq('id', pick.company_id)
+              .maybeSingle();
+            if (!co.error && co.data) {
+              setCompany({ id: co.data.id as string, name: co.data.name as string });
+            }
+
+            // Friendly label
+            const roles = (pick.roles ?? []).map((r) => (r ?? '').toUpperCase());
+            const mgrSub = (pick.manager_subroles ?? []).map((r) => (r ?? '').toUpperCase());
+            const staffSub = (pick.staff_subroles ?? []).map((r) => (r ?? '').toUpperCase());
+            const positions = pick.company_positions ?? [];
+
+            let label = 'Member';
+            if (roles.includes('MANAGER')) {
+              // Deputy manager if any home has that subrole
+              label = mgrSub.includes('DEPUTY_MANAGER') ? 'Manager — Deputy' : 'Manager';
+              if ((pick.home_ids?.length ?? 0) > 1) label += ' (multi-home)';
+            } else if (roles.includes('STAFF')) {
+              if (staffSub.includes('TEAM_LEADER')) label = 'Staff — Team Leader';
+              else label = 'Staff — Residential';
+            } else if (pick.is_bank) {
+              label = 'Staff — Bank';
+            } else if (pick.has_company_access) {
+              label = 'Company';
+            }
+
+            // If they also have company positions, append for clarity
+            if (positions.length) {
+              label += ` — ${positions.join(', ')}`;
+            }
+
+            setRoleLabel(label);
+          }
+        }
+
+        setPhase('ready');
+      } catch (e) {
+        setErrMsg(e instanceof Error ? e.message : 'Something went wrong.');
+        setPhase('error');
       }
     })();
-
-    return () => {
-      cancelled = true;
-      sub.data.subscription.unsubscribe();
-    };
-  }, [router, search]);
-
-  async function loadUserAndData(uid: string) {
-    // Email from session
-    const { data: sess } = await supabase.auth.getSession();
-    const emailVal = sess.session?.user?.email ?? '';
-    setEmail(typeof emailVal === 'string' ? emailVal : '');
-
-    // Profile name (profiles.user_id)
-    const prof = await supabase
-      .from('profiles')
-      .select('full_name')
-      .eq('user_id', uid)
-      .maybeSingle();
-    setFullName((prof.data?.full_name ?? '').trim());
-
-    // Company (via company_memberships)
-    const cm = await supabase
-      .from('company_memberships')
-      .select('company_id')
-      .eq('user_id', uid)
-      .maybeSingle();
-    if (cm.data?.company_id) {
-      const co = await supabase
-        .from('companies')
-        .select('id,name')
-        .eq('id', cm.data.company_id)
-        .maybeSingle();
-      if (co.data) setCompany({ id: co.data.id, name: co.data.name });
-    } else {
-      setCompany(null);
-    }
-
-    // Role label resolution
-    const mgrIds = await supabase.rpc('home_ids_managed_by', { p_user: uid });
-    const managerHomes = Array.isArray(mgrIds.data) ? (mgrIds.data as string[]) : [];
-    if (managerHomes.length) {
-      setRoleLabel(`Manager${managerHomes.length > 1 ? ' (multi-home)' : ''}`);
-      return;
-    }
-
-    const hms = await supabase
-      .from('home_memberships')
-      .select('home_id, role, manager_subrole, staff_subrole')
-      .eq('user_id', uid);
-
-    const rows: HomeMembership[] = Array.isArray(hms.data)
-      ? (hms.data as HomeMembership[]).map((r) => ({
-          home_id: r.home_id,
-          role: (r.role ?? '') as 'MANAGER' | 'STAFF' | null,
-          manager_subrole: (r.manager_subrole ?? '') as 'MANAGER' | 'DEPUTY_MANAGER' | null,
-          staff_subrole: (r.staff_subrole ?? '') as 'RESIDENTIAL' | 'TEAM_LEADER' | null,
-        }))
-      : [];
-
-    const deputy = rows.find((r) => r.role === 'MANAGER' && r.manager_subrole === 'DEPUTY_MANAGER');
-    const teamLead = rows.find((r) => r.role === 'STAFF' && r.staff_subrole === 'TEAM_LEADER');
-    const staff = rows.find((r) => r.role === 'STAFF');
-
-    if (deputy) setRoleLabel('Manager — Deputy');
-    else if (teamLead) setRoleLabel('Staff — Team Leader');
-    else if (staff) setRoleLabel('Staff — Residential');
-    else {
-      const bank = await supabase
-        .from('bank_memberships')
-        .select('company_id')
-        .eq('user_id', uid)
-        .limit(1);
-      if (Array.isArray(bank.data) && bank.data.length) setRoleLabel('Staff — Bank');
-      else setRoleLabel(company ? 'Company' : 'Member');
-    }
-  }
+  }, [params]);
 
   async function savePassword() {
     if (!strongEnough || saving) return;
@@ -171,7 +205,7 @@ export default function Welcome() {
     }
   }
 
-  if (loading) {
+  if (phase === 'verifying' || phase === 'loading') {
     return (
       <div className="p-6 min-h-screen" style={{ background: 'var(--page-bg)', color: 'var(--ink)' }}>
         <div className="animate-pulse">Loading…</div>
@@ -179,6 +213,27 @@ export default function Welcome() {
     );
   }
 
+  if (phase === 'error') {
+    return (
+      <div className="p-6 min-h-screen" style={{ background: 'var(--page-bg)', color: 'var(--ink)' }}>
+        <div className="max-w-xl mx-auto space-y-4">
+          <h1 className="text-lg font-semibold">We couldn’t finish signing you in</h1>
+          <p className="text-sm" style={{ color: 'var(--sub)' }}>
+            {errMsg || 'Your invite link may have expired. Try logging in, or ask your admin to resend the invite.'}
+          </p>
+          <button
+            onClick={() => router.replace('/auth/login')}
+            className="rounded-md px-3 py-2 text-sm ring-1 transition"
+            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+          >
+            Go to login
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // phase === 'ready'
   return (
     <div className="p-6 min-h-screen" style={{ background: 'var(--page-bg)', color: 'var(--ink)' }}>
       <div className="max-w-xl mx-auto space-y-4">
@@ -205,6 +260,7 @@ export default function Welcome() {
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             placeholder="At least 12 characters"
+            autoComplete="new-password"
           />
           <input
             type="password"
@@ -213,6 +269,7 @@ export default function Welcome() {
             value={pw2}
             onChange={(e) => setPw2(e.target.value)}
             placeholder="Repeat password"
+            autoComplete="new-password"
           />
 
           <div className="text-xs" style={{ color: 'var(--sub)' }}>
