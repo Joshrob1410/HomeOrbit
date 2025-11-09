@@ -934,8 +934,8 @@ function PersonRow({
     isManager: boolean;
     companyIdContext: string;
     onAfterSave?: () => Promise<void> | void;
-    verifyStatus?: 'pending' | 'verified';       // NEW
-    onResendInvite?: () => void;                  // NEW
+    verifyStatus?: 'pending' | 'verified';
+    onResendInvite?: () => void;
 }) {
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -946,22 +946,41 @@ function PersonRow({
 
     const [companyId, setCompanyId] = useState<string>('');
     const [homeId, setHomeId] = useState<string>(row.home_id || '');
+
     type PositionValue = '' | 'BANK' | 'RESIDENTIAL' | 'TEAM_LEADER' | 'MANAGER' | 'DEPUTY_MANAGER';
     const [positionEdit, setPositionEdit] = useState<PositionValue>('');
 
     const [managerHomeIdsEdit, setManagerHomeIdsEdit] = useState<string[]>([]);
     const [currentlyManager, setCurrentlyManager] = useState(false);
     const [companyPositionsEdit, setCompanyPositionsEdit] = useState<string[]>([]);
+    const [appRole, setAppRole] = useState<AppLevel | ''>('');           // <-- moved ABOVE the effect
+    const isCompanyLevel = appRole === '2_COMPANY';
+    const isAdminLevel = appRole === '1_ADMIN';
+    const allowHomeEdits = !isCompanyLevel && !isAdminLevel; // homes only for Staff/Manager
+    const [companyPosOptions, setCompanyPosOptions] = useState<string[]>([]);
 
-    const [appRole, setAppRole] = useState<AppLevel | ''>('');
+    // Load options when editing a COMPANY-level user
+    useEffect(() => {
+        let cancelled = false;
+
+        if (!editing || appRole !== '2_COMPANY') return;
+
+        (async () => {
+            const resp = await supabase.rpc('company_position_options');
+            if (!cancelled && Array.isArray(resp.data)) {
+                setCompanyPosOptions(resp.data.map(String));
+            }
+        })();
+
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [editing, appRole]); // removed supabase from deps (stable singleton)
+
     const [viewerId, setViewerId] = useState<string | null>(null);
 
-    const U = (s?: string | null) => (s ?? '').trim().toUpperCase();
-    const asStringArray = (v: unknown): string[] =>
-        Array.isArray(v) ? v.map(String) : v == null ? [] : [String(v)];
-
     const [chipText, setChipText] = useState<string>('');
-    const [chipTone, setChipTone] = useState<'manager' | 'staff' | 'company' | 'bank' | 'admin' | 'default'>('default');
+    const [chipTone, setChipTone] =
+        useState<'manager' | 'staff' | 'company' | 'bank' | 'admin' | 'default'>('default');
 
     useEffect(() => {
         setName(row.full_name || '');
@@ -978,47 +997,174 @@ function PersonRow({
         })();
     }, []);
 
+    // Auto-select a company when the editor opens (admin only)
     useEffect(() => {
         if (editing && isAdmin && !companyId) {
             setCompanyId(companies[0]?.id || '');
         }
     }, [editing, isAdmin, companyId, companies]);
 
+    // When in BANK mode, ensure there's no home selected
+    const bankMode =
+        (appRole === '4_STAFF' && positionEdit === 'BANK') || (!positionEdit && row.is_bank);
     useEffect(() => {
-        const load = async () => {
-            if (!editing) return;
-            const wantsManagerMulti = positionEdit === 'MANAGER' || currentlyManager;
-            if (!wantsManagerMulti) return;
-            if (managerHomeIdsEdit.length > 0) return;
-            const { data, error } = await supabase
-                .from('home_memberships')
-                .select('home_id')
-                .eq('user_id', row.user_id)
-                .eq('role', 'MANAGER');
-            if (!error && data) {
-                const ids = (data as { home_id: string }[]).map((d) => d.home_id);
-                setManagerHomeIdsEdit(ids);
-                setCurrentlyManager(ids.length > 0);
-            }
-        };
-        load();
-    }, [editing, positionEdit, currentlyManager, managerHomeIdsEdit.length, row.user_id]);
+        if (bankMode && homeId) setHomeId('');
+    }, [bankMode, homeId]);
 
+    // ===== Permissions (unchanged) =====
+    const canEditName = isAdmin || isCompany || isManager;
+    const canEditEmail = canEditName;
+    const canEditPassword = canEditName;
+    const canChangeCompany = isAdmin;
+    const canChangeHome = isAdmin || isCompany || isManager;
+
+    const LEVEL_RANK: Record<AppLevel, number> = {
+        '1_ADMIN': 1, '2_COMPANY': 2, '3_MANAGER': 3, '4_STAFF': 4,
+    };
+    const LEVEL_LABELS: Record<AppLevel, string> = {
+        '1_ADMIN': 'Admin', '2_COMPANY': 'Company', '3_MANAGER': 'Manager', '4_STAFF': 'Staff',
+    };
+    const viewerCap: AppLevel = isAdmin ? '1_ADMIN' : isCompany ? '2_COMPANY' : '3_MANAGER';
+    const canChangeAppRole = (isAdmin || isCompany || isManager) && viewerId !== row.user_id;
+    const allowedAppLevels: AppLevel[] =
+        (['1_ADMIN', '2_COMPANY', '3_MANAGER', '4_STAFF'] as AppLevel[])
+            .filter((l) => LEVEL_RANK[l] >= LEVEL_RANK[viewerCap]);
+
+    // ===== Types for RPC snapshot =====
+    type RoleKind = 'STAFF' | 'MANAGER';
+    type StaffSubrole = 'RESIDENTIAL' | 'TEAM_LEADER' | 'BANK';
+    type ManagerSubrole = 'MANAGER' | 'DEPUTY_MANAGER' | null;
+
+    type SnapshotRow = {
+        user_id: string;
+        email: string | null;
+        full_name: string | null;
+        is_admin: boolean | null;
+        company_id: string | null;
+        has_company_access: boolean | null;
+        is_bank: boolean | null;
+        home_ids: string[] | null;
+        roles: RoleKind[] | null;
+        staff_subroles: StaffSubrole[] | null;
+        manager_subroles: ManagerSubrole[] | null;
+        company_positions: string[] | null;
+    };
+
+    // ===== Prefill via RPC (single source of truth) =====
+    async function prefillFromServer() {
+        setSaving(true);
+        try {
+            const me = await supabase.auth.getUser();
+            setViewerId(me.data.user?.id ?? null);
+
+            const cid = companyIdContext;
+            // inside prefillFromServer()
+            const resp = await supabase.rpc('person_edit_snapshot', {
+                p_target_user: row.user_id,
+                p_company_id: cid,
+            });
+            if (resp.error) throw resp.error;
+
+            const rows: SnapshotRow[] = Array.isArray(resp.data) ? (resp.data as SnapshotRow[]) : [];
+            const snap: SnapshotRow | undefined = rows[0];
+            if (!snap) {
+                // graceful fallback; keep editor open but with minimal defaults
+                setCompanyId(cid);
+                setEmail('');
+                setCompanyPositionsEdit([]);
+                setManagerHomeIdsEdit([]);
+                setCurrentlyManager(false);
+                setPositionEdit('');
+                setAppRole('4_STAFF');
+                return;
+            }
+
+            // Identity
+            setCompanyId(snap.company_id ?? cid);
+            setEmail(snap.email ?? '');
+            setName(snap.full_name ?? '');
+
+            // Company positions
+            setCompanyPositionsEdit(Array.isArray(snap.company_positions) ? snap.company_positions : []);
+
+            const rolesArr: RoleKind[] = Array.isArray(snap.roles) ? snap.roles : [];
+            const homeIdsArr: string[] = Array.isArray(snap.home_ids) ? snap.home_ids : [];
+            const staffSubs: StaffSubrole[] = Array.isArray(snap.staff_subroles) ? snap.staff_subroles : [];
+            const mgrSubs: ManagerSubrole[] = Array.isArray(snap.manager_subroles) ? snap.manager_subroles : [];
+
+            // Manager homes (multi)
+            const mHomeIds: string[] = [];
+            for (let i = 0; i < rolesArr.length; i += 1) {
+                if (rolesArr[i] === 'MANAGER' && typeof homeIdsArr[i] === 'string') {
+                    mHomeIds.push(homeIdsArr[i]);
+                }
+            }
+            setManagerHomeIdsEdit(mHomeIds);
+            setCurrentlyManager(mHomeIds.length > 0);
+
+            // Derive "position" select value
+            let derived: PositionValue = '';
+            if (snap.is_bank) {
+                derived = 'BANK';
+            } else if (rolesArr.includes('MANAGER')) {
+                derived = mgrSubs.includes('DEPUTY_MANAGER') ? 'DEPUTY_MANAGER' : 'MANAGER';
+            } else if (rolesArr.includes('STAFF')) {
+                derived = staffSubs.includes('TEAM_LEADER') ? 'TEAM_LEADER' : 'RESIDENTIAL';
+            }
+            setPositionEdit(derived);
+
+            // Pick a staff home (non-manager, non-bank)
+            if (!snap.is_bank && !rolesArr.includes('MANAGER')) {
+                const firstStaffIdx = rolesArr.findIndex((r) => r === 'STAFF');
+                setHomeId(firstStaffIdx >= 0 && typeof homeIdsArr[firstStaffIdx] === 'string'
+                    ? homeIdsArr[firstStaffIdx]
+                    : (row.home_id || ''));
+            } else {
+                setHomeId((derived === 'MANAGER' || derived === 'DEPUTY_MANAGER') ? '' : (row.home_id || ''));
+            }
+
+            // Effective app role for the TARGET (not viewer)
+            const targetLevel: AppLevel =
+                (snap.is_admin ? '1_ADMIN'
+                    : snap.has_company_access ? '2_COMPANY'
+                        : rolesArr.includes('MANAGER') ? '3_MANAGER'
+                            : '4_STAFF');
+            setAppRole(targetLevel);
+
+            // Chip (display)
+            if (snap.is_admin) {
+                setChipText('Admin'); setChipTone('admin');
+            } else if (snap.is_bank) {
+                setChipText('Staff — Bank'); setChipTone('bank');
+            } else if (rolesArr.includes('MANAGER')) {
+                setChipText(mgrSubs.includes('DEPUTY_MANAGER') ? 'Manager — Deputy' : 'Manager — Manager');
+                setChipTone('manager');
+            } else if (rolesArr.includes('STAFF')) {
+                setChipText(staffSubs.includes('TEAM_LEADER') ? 'Staff — Team Leader' : 'Staff — Residential');
+                setChipTone('staff');
+            } else {
+                const labels = (snap.company_positions ?? []).join(', ');
+                setChipText(labels ? `Company — ${labels}` : 'Company — Member');
+                setChipTone('company');
+            }
+        } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('prefillFromServer failed', e);
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    // Optional: show a chip even when not editing (matches your previous behavior)
     useEffect(() => {
         let cancelled = false;
 
-        async function loadRoleChip() {
+        async function loadRoleChip(): Promise<void> {
             try {
-                // Bank row
                 if (row.is_bank) {
-                    if (!cancelled) {
-                        setChipText('Staff — Bank');
-                        setChipTone('bank');
-                    }
+                    if (!cancelled) { setChipText('Staff — Bank'); setChipTone('bank'); }
                     return;
                 }
-
-                // Home row: read membership for THIS home to resolve subrole
                 if (row.home_id) {
                     const { data, error } = await supabase
                         .from('home_memberships')
@@ -1028,161 +1174,37 @@ function PersonRow({
                         .maybeSingle();
 
                     if (!error && data) {
-                        const U = (s?: string | null) => (s ?? '').trim().toUpperCase();
-                        const role = U(data.role); // "MANAGER" | "STAFF" | null
-                        const mSub = U(data.manager_subrole); // "MANAGER" | "DEPUTY_MANAGER" | null
-                        const sSub = U(data.staff_subrole); // "RESIDENTIAL" | "TEAM_LEADER" | null
+                        const role = (data.role ?? '').toString().toUpperCase();
+                        const mSub = (data.manager_subrole ?? '').toString().toUpperCase();
+                        const sSub = (data.staff_subrole ?? '').toString().toUpperCase();
 
                         if (role === 'MANAGER') {
-                            const label = mSub === 'DEPUTY_MANAGER' ? 'Manager — Deputy' : 'Manager — Manager';
                             if (!cancelled) {
-                                setChipText(label);
+                                setChipText(mSub === 'DEPUTY_MANAGER' ? 'Manager — Deputy' : 'Manager — Manager');
                                 setChipTone('manager');
                             }
-                        } else {
-                            const label = sSub === 'TEAM_LEADER' ? 'Staff — Team Leader' : 'Staff — Residential';
-                            if (!cancelled) {
-                                setChipText(label);
-                                setChipTone('staff');
-                            }
+                            return;
+                        }
+                        if (!cancelled) {
+                            setChipText(sSub === 'TEAM_LEADER' ? 'Staff — Team Leader' : 'Staff — Residential');
+                            setChipTone('staff');
                         }
                         return;
                     }
                 }
-
-                // Company-only row: pull company positions (array) if any
-                const { data: cm } = await supabase
-                    .from('company_memberships')
-                    .select('positions')
-                    .eq('user_id', row.user_id)
-                    .maybeSingle();
-
-                const positions = Array.isArray(cm?.positions) ? cm!.positions : [];
-                const label = positions.length ? `Company — ${positions.join(', ')}` : 'Company — Member';
+                // company-only
                 if (!cancelled) {
-                    setChipText(label);
+                    setChipText('Company — Member');
                     setChipTone('company');
                 }
             } catch {
-                if (!cancelled) {
-                    setChipText('');
-                    setChipTone('default');
-                }
+                if (!cancelled) { setChipText(''); setChipTone('default'); }
             }
         }
 
         loadRoleChip();
-        return () => {
-            cancelled = true;
-        };
+        return () => { cancelled = true; };
     }, [row.user_id, row.home_id, row.is_bank]);
-
-    async function prefillFromServer() {
-        // Hoisted so it's visible throughout the function
-        type CompanyMembershipRow = { company_id: string | null; positions: string[] | null } | null;
-        let companyMembership: CompanyMembershipRow = null;
-
-        try {
-            const { data } = await supabase
-                .from('company_memberships')
-                .select('company_id, positions')
-                .eq('user_id', row.user_id)
-                .maybeSingle();
-
-            companyMembership = data ?? null;
-
-            if (companyMembership?.company_id) {
-                setCompanyId(companyMembership.company_id);
-            }
-            setCompanyPositionsEdit(asStringArray(companyMembership?.positions));
-        } catch {
-            /* noop */
-        }
-
-        try {
-            const rpc = await supabase.rpc('home_ids_managed_by', { p_user: row.user_id });
-            const managerIds: string[] = (rpc.data || []) as string[];
-            if (managerIds.length > 0) {
-                setManagerHomeIdsEdit(managerIds);
-                setCurrentlyManager(true);
-                setAppRole('3_MANAGER');
-                setPositionEdit('MANAGER');
-                return;
-            }
-        } catch (e) {
-            console.error('prefill: home_ids_managed_by failed', e);
-        }
-
-        type HomeMembership = {
-            home_id: string;
-            role: 'MANAGER' | 'STAFF' | null;
-            manager_subrole: 'MANAGER' | 'DEPUTY_MANAGER' | null;
-            staff_subrole: 'RESIDENTIAL' | 'TEAM_LEADER' | null;
-        };
-
-        let hmsRaw: HomeMembership[] | null = null;
-        try {
-            const { data } = await supabase
-                .from('home_memberships')
-                .select('home_id, role, manager_subrole, staff_subrole')
-                .eq('user_id', row.user_id);
-            hmsRaw = data || [];
-        } catch (e) {
-            console.warn('prefill: home_memberships blocked/failed', e);
-        }
-
-        const U2 = (s?: string | null) => (s ?? '').trim().toUpperCase();
-        const hms = (hmsRaw ?? []).map((r) => ({
-            home_id: r.home_id,
-            role: (U2(r.role) as 'MANAGER' | 'STAFF' | null) || null,
-            manager_subrole: (U2(r.manager_subrole) as 'MANAGER' | 'DEPUTY_MANAGER' | null) || null,
-            staff_subrole: (U2(r.staff_subrole) as 'RESIDENTIAL' | 'TEAM_LEADER' | null) || null,
-        }));
-
-        const deputy = hms.find((r) => r.role === 'MANAGER' && r.manager_subrole === 'DEPUTY_MANAGER');
-        if (deputy) {
-            setAppRole('3_MANAGER');
-            setPositionEdit('DEPUTY_MANAGER');
-            setHomeId(deputy.home_id);
-            return;
-        }
-
-        const teamLead = hms.find((r) => r.role === 'STAFF' && r.staff_subrole === 'TEAM_LEADER');
-        if (teamLead) {
-            setAppRole('4_STAFF');
-            setPositionEdit('TEAM_LEADER');
-            setHomeId(teamLead.home_id);
-            return;
-        }
-
-        const staffAny = hms.find((r) => r.role === 'STAFF');
-        if (staffAny) {
-            setAppRole('4_STAFF');
-            setPositionEdit('RESIDENTIAL');
-            setHomeId(staffAny.home_id);
-            return;
-        }
-
-        if (row.is_bank) {
-            setAppRole('4_STAFF');
-            setPositionEdit('BANK');
-            setHomeId('');
-            return;
-        }
-
-        if (row.home_id) {
-            setAppRole('4_STAFF');
-            setPositionEdit('RESIDENTIAL');
-            setHomeId(row.home_id);
-            return;
-        }
-
-        // Fallback: company-only membership
-        if (companyMembership?.company_id) {
-            setAppRole('2_COMPANY');
-        }
-    }
-
 
     async function sendPasswordReset() {
         const addr = email.trim();
@@ -1191,62 +1213,19 @@ function PersonRow({
             return;
         }
         try {
-            // optional: include redirectTo if you use a custom reset page
             await supabase.auth.resetPasswordForEmail(addr);
             alert('Password reset email sent.');
-        } catch (e) {
+        } catch {
             alert('Failed to send reset. Please try again.');
         }
     }
 
-
-    const canEditName = isAdmin || isCompany || isManager;
-    const canEditEmail = canEditName;
-    const canEditPassword = canEditName;
-    const canChangeCompany = isAdmin;
-    const canChangeHome = isAdmin || isCompany || isManager;
-
-    const LEVEL_RANK: Record<AppLevel, number> = {
-        '1_ADMIN': 1,
-        '2_COMPANY': 2,
-        '3_MANAGER': 3,
-        '4_STAFF': 4,
-    };
-    const LEVEL_LABELS: Record<AppLevel, string> = {
-        '1_ADMIN': 'Admin',
-        '2_COMPANY': 'Company',
-        '3_MANAGER': 'Manager',
-        '4_STAFF': 'Staff',
-    };
-    const viewerCap: AppLevel = isAdmin ? '1_ADMIN' : isCompany ? '2_COMPANY' : '3_MANAGER';
-    const canChangeAppRole = (isAdmin || isCompany || isManager) && viewerId !== row.user_id;
-    const allowedAppLevels: AppLevel[] = (['1_ADMIN', '2_COMPANY', '3_MANAGER', '4_STAFF'] as AppLevel[]).filter(
-        (l) => LEVEL_RANK[l] >= LEVEL_RANK[viewerCap],
-    );
-
-    const bankMode =
-        (appRole === '4_STAFF' && positionEdit === 'BANK') || (!positionEdit && row.is_bank);
-
-    useEffect(() => {
-        if (bankMode && homeId) setHomeId('');
-    }, [bankMode, homeId]);
-
     async function handleEditClick() {
         await prefillFromServer();
-
-        // Prefill email from server (service role -> auth.users)
-        try {
-            const res = await authFetch(`/api/admin/people/email?user_id=${row.user_id}`);
-            if (res.ok) {
-                const j = await res.json();
-                if (typeof j?.email === 'string') setEmail(j.email);
-            }
-        } catch {/* noop */ }
-
         setEditing(true);
     }
 
-
+    // ===== Save logic =====
     async function save() {
         setSaving(true);
         try {
@@ -1263,6 +1242,7 @@ function PersonRow({
                 set_manager_homes?: { home_ids: string[] };
                 set_level?: { level: AppLevel; company_id: string | null };
                 ensure_role_manager?: boolean;
+                company_positions?: string[];
             };
 
             const body: UpdatePersonBody = { user_id: row.user_id };
@@ -1280,51 +1260,53 @@ function PersonRow({
             }
 
             if (canChangeHome) {
-                const isManagerManager = appRole === '3_MANAGER' && positionEdit === 'MANAGER';
-                if (isManagerManager) {
-                    body.set_manager_homes = { home_ids: managerHomeIdsEdit };
-                } else if (bankMode) {
-                    const bankCompanyId = (isAdmin && companyId ? companyId : companyIdContext) as string;
-                    body.set_bank = {
-                        company_id: bankCompanyId,
-                        ...(row.home_id ? { home_id: row.home_id } : {}),
-                    };
-                } else if (!homeId) {
-                    if (row.home_id) {
-                        body.clear_home = { home_id: row.home_id };
+                // Homes are ONLY applicable when not Company/Admin
+                if (allowHomeEdits) {
+                    const isManagerManager = appRole === '3_MANAGER' && positionEdit === 'MANAGER';
+                    if (isManagerManager) {
+                        body.set_manager_homes = { home_ids: managerHomeIdsEdit };
+                    } else if (bankMode) {
+                        const bankCompanyId = (isAdmin && companyId ? companyId : companyIdContext);
+                        body.set_bank = {
+                            company_id: bankCompanyId,
+                            ...(row.home_id ? { home_id: row.home_id } : {}),
+                        };
+                    } else if (!homeId) {
+                        if (row.home_id) body.clear_home = { home_id: row.home_id };
+                    } else if (row.home_id !== homeId) {
+                        body.set_home = {
+                            home_id: homeId,
+                            ...(row.is_bank && (companyId || companyIdContext)
+                                ? { clear_bank_for_company: (companyId || companyIdContext) }
+                                : {}),
+                        };
                     }
-                } else if (row.home_id !== homeId) {
-                    const ensuredHomeId = homeId as string;
-                    body.set_home = {
-                        home_id: ensuredHomeId,
-                        ...(row.is_bank && (companyId || companyIdContext)
-                            ? { clear_bank_for_company: (companyId || companyIdContext) as string }
-                            : {}),
-                    };
+                } else {
+                    // If switching to Company/Admin, proactively clear any home/manager homes
+                    if ((currentlyManager || managerHomeIdsEdit.length > 0)) {
+                        body.set_manager_homes = { home_ids: [] }; // clear manager assignments
+                    }
+                    if (row.home_id || homeId) {
+                        body.clear_home = { home_id: homeId || row.home_id! }; // clear staff home
+                    }
                 }
             }
 
+
             if (positionEdit) {
                 if (positionEdit === 'BANK') {
-                    // no-op
+                    // set_bank handled above by bankMode branch when applicable
                 } else if (positionEdit === 'MANAGER') {
                     body.ensure_role_manager = true;
                 } else {
-                    const targetHome = homeId || row.home_id;
+                    const targetHome = homeId || row.home_id || '';
                     if (!targetHome) throw new Error('Select a home before assigning this position.');
                     let apiRole: 'STAFF' | 'TEAM_LEADER' | 'MANAGER' | 'DEPUTY_MANAGER';
                     switch (positionEdit) {
-                        case 'RESIDENTIAL':
-                            apiRole = 'STAFF';
-                            break;
-                        case 'TEAM_LEADER':
-                            apiRole = 'TEAM_LEADER';
-                            break;
-                        case 'DEPUTY_MANAGER':
-                            apiRole = 'DEPUTY_MANAGER';
-                            break;
-                        default:
-                            apiRole = 'STAFF';
+                        case 'RESIDENTIAL': apiRole = 'STAFF'; break;
+                        case 'TEAM_LEADER': apiRole = 'TEAM_LEADER'; break;
+                        case 'DEPUTY_MANAGER': apiRole = 'DEPUTY_MANAGER'; break;
+                        default: apiRole = 'STAFF';
                     }
                     body.set_home_role = { home_id: targetHome, role: apiRole };
                 }
@@ -1340,6 +1322,10 @@ function PersonRow({
                 };
             }
 
+            if (Array.isArray(companyPositionsEdit)) {
+                body.company_positions = companyPositionsEdit;
+            }
+
             const res = await authFetch('/api/admin/people/update', {
                 method: 'PATCH',
                 body: JSON.stringify(body),
@@ -1348,20 +1334,23 @@ function PersonRow({
                 let message = 'Failed to update';
                 try {
                     const j = await res.json();
-                    if (j?.error) message = j.error;
-                } catch {
-                    /* noop */
-                }
+                    if (j && typeof j === 'object' && 'error' in j && typeof (j as { error?: string }).error === 'string') {
+                        message = (j as { error: string }).error;
+                    }
+                } catch { /* ignore */ }
                 throw new Error(message);
             }
 
             setEditing(false);
-            if (onAfterSave) await onAfterSave?.();
+            await onAfterSave?.();
+
+            // reset local form
             setEmail('');
             setPassword('');
             setPositionEdit('');
             setCompanyPositionsEdit([]);
             setAppRole('');
+            setManagerHomeIdsEdit([]);
         } catch (err) {
             // eslint-disable-next-line no-alert
             alert(err instanceof Error ? err.message : 'Failed to save');
@@ -1396,9 +1385,7 @@ function PersonRow({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {canEditName && (
                             <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    Name
-                                </label>
+                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>Name</label>
                                 <input
                                     className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
                                     style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
@@ -1407,40 +1394,36 @@ function PersonRow({
                                 />
                             </div>
                         )}
-                            {canEditEmail && (
-                                <div className="md:col-span-2">
-                                    <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                        Email
-                                    </label>
-                                    <div className="mt-1 flex gap-2">
-                                        <input
-                                            className="w-full rounded-md px-2 py-2 ring-1 text-sm"
-                                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                            value={email}
-                                            onChange={(e) => setEmail(e.target.value)}
-                                            placeholder="user@example.com"
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={sendPasswordReset}
-                                            className="rounded-md px-3 py-2 text-sm ring-1"
-                                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                                            title="Email a password reset link to this address"
-                                            disabled={!email.trim()}
-                                        >
-                                            Send password reset
-                                        </button>
-                                    </div>
-                                    <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
-                                        We’ll email a reset link using your Supabase project’s mailer.
-                                    </p>
+                        {canEditEmail && (
+                            <div className="md:col-span-2">
+                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>Email</label>
+                                <div className="mt-1 flex gap-2">
+                                    <input
+                                        className="w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        placeholder="user@example.com"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={sendPasswordReset}
+                                        className="rounded-md px-3 py-2 text-sm ring-1"
+                                        style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                        title="Email a password reset link to this address"
+                                        disabled={!email.trim()}
+                                    >
+                                        Send password reset
+                                    </button>
                                 </div>
-                            )}
+                                <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
+                                    We’ll email a reset link using your Supabase project’s mailer.
+                                </p>
+                            </div>
+                        )}
                         {canChangeCompany && (
                             <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    Company (admin only)
-                                </label>
+                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>Company (admin only)</label>
                                 <select
                                     className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
                                     style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
@@ -1449,65 +1432,68 @@ function PersonRow({
                                 >
                                     <option value="">(Select company)</option>
                                     {companies.map((c) => (
-                                        <option key={c.id} value={c.id}>
-                                            {c.name}
-                                        </option>
+                                        <option key={c.id} value={c.id}>{c.name}</option>
                                     ))}
                                 </select>
                             </div>
                         )}
-                        {canChangeHome && (
-                            <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    {positionEdit === 'MANAGER' || currentlyManager ? 'Homes (select all that apply)' : 'Home'}
-                                </label>
-                                {(() => {
-                                    const showManagerMulti = positionEdit === 'MANAGER' || currentlyManager;
-                                    const homesUnion = (() => {
-                                        const map = new Map<string, Home>();
-                                        homes.forEach((h) => map.set(h.id, h));
-                                        managerHomeIdsEdit.forEach((id) => {
-                                            if (!map.has(id)) {
-                                                map.set(id, { id, name: '(out of scope)', company_id: '' });
-                                            }
-                                        });
-                                        return Array.from(map.values());
-                                    })();
-                                    return showManagerMulti ? (
-                                        <MultiSelect
-                                            value={managerHomeIdsEdit}
-                                            onChange={setManagerHomeIdsEdit}
-                                            options={homesUnion.map((h) => ({
-                                                value: h.id,
-                                                label: h.name,
-                                            }))}
-                                        />
-                                    ) : (
-                                        <select
-                                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
-                                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                            value={homeId}
-                                            onChange={(e) => setHomeId(e.target.value)}
-                                            disabled={bankMode}
-                                            aria-disabled={bankMode}
-                                            title={bankMode ? 'Home is locked when position is Bank' : undefined}
-                                        >
-                                            <option value="">(No fixed home)</option>
-                                            {homesUnion.map((h) => (
-                                                <option key={h.id} value={h.id}>
-                                                    {h.name}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    );
-                                })()}
-                                {bankMode && (
-                                    <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
-                                        Position is <b>Bank</b>; home is not applicable.
-                                    </p>
-                                )}
-                            </div>
-                        )}
+                            {canChangeHome && allowHomeEdits && (
+                                <div>
+                                    <label className="block text-xs" style={{ color: 'var(--ink)' }}>
+                                        {positionEdit === 'MANAGER' || currentlyManager ? 'Homes (select all that apply)' : 'Home'}
+                                    </label>
+                                    {(() => {
+                                        const showManagerMulti = positionEdit === 'MANAGER' || currentlyManager;
+                                        const homesUnion = (() => {
+                                            const map = new Map<string, Home>();
+                                            homes.forEach((h) => map.set(h.id, h));
+                                            managerHomeIdsEdit.forEach((id) => {
+                                                if (!map.has(id)) map.set(id, { id, name: '(out of scope)', company_id: '' });
+                                            });
+                                            return Array.from(map.values());
+                                        })();
+                                        return showManagerMulti ? (
+                                            <MultiSelect
+                                                value={managerHomeIdsEdit}
+                                                onChange={setManagerHomeIdsEdit}
+                                                options={homesUnion.map((h) => ({ value: h.id, label: h.name }))}
+                                            />
+                                        ) : (
+                                            <select
+                                                className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                value={homeId}
+                                                onChange={(e) => setHomeId(e.target.value)}
+                                                disabled={bankMode}
+                                                aria-disabled={bankMode}
+                                                title={bankMode ? 'Home is locked when position is Bank' : undefined}
+                                            >
+                                                <option value="">(No fixed home)</option>
+                                                {homesUnion.map((h) => (
+                                                    <option key={h.id} value={h.id}>{h.name}</option>
+                                                ))}
+                                            </select>
+                                        );
+                                    })()}
+                                    {bankMode && (
+                                        <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
+                                            Position is <b>Bank</b>; home is not applicable.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+                            {canChangeHome && !allowHomeEdits && (
+                                <div>
+                                    <label className="block text-xs" style={{ color: 'var(--ink)' }}>Home</label>
+                                    <div
+                                        className="mt-1 rounded-md px-2 py-2 ring-1 text-sm"
+                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--sub)', borderColor: 'var(--ring)' }}
+                                    >
+                                        Company-level (or Admin) users are not linked to homes.
+                                    </div>
+                                </div>
+                            )}
+
                         <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
                             <div className={`${canChangeAppRole ? '' : 'opacity-60'}`}>
                                 <label className="block text-xs" style={{ color: 'var(--ink)' }}>
@@ -1527,9 +1513,7 @@ function PersonRow({
                                 >
                                     <option value="">(No change)</option>
                                     {allowedAppLevels.map((lvl) => (
-                                        <option key={lvl} value={lvl}>
-                                            {LEVEL_LABELS[lvl]}
-                                        </option>
+                                        <option key={lvl} value={lvl}>{LEVEL_LABELS[lvl]}</option>
                                     ))}
                                 </select>
                                 {!isAdmin && canChangeAppRole && (
@@ -1539,9 +1523,7 @@ function PersonRow({
                                 )}
                             </div>
                             <div>
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>
-                                    Position
-                                </label>
+                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>Position</label>
                                 {appRole === '4_STAFF' && (
                                     <select
                                         className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
@@ -1567,18 +1549,34 @@ function PersonRow({
                                         <option value="DEPUTY_MANAGER">Deputy Manager</option>
                                     </select>
                                 )}
-                                {appRole === '2_COMPANY' && (
-                                    <div className="mt-1 rounded-md px-2 py-2 ring-1 text-sm"
-                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--sub)', borderColor: 'var(--ring)' }}
-                                    >
-                                        Company positions are managed separately.
-                                    </div>
-                                )}
+                                    {appRole === '2_COMPANY' && (
+                                        <div>
+                                            <label className="block text-xs" style={{ color: 'var(--ink)' }}>
+                                                Company positions
+                                            </label>
+                                            {companyPosOptions.length > 0 ? (
+                                                <MultiSelect
+                                                    value={companyPositionsEdit}
+                                                    onChange={setCompanyPositionsEdit}
+                                                    options={companyPosOptions.map((p) => ({ value: p, label: p.replace(/_/g, ' ') }))}
+                                                />
+                                            ) : (
+                                                <div
+                                                    className="mt-1 rounded-md px-2 py-2 ring-1 text-sm"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--sub)', borderColor: 'var(--ring)' }}
+                                                >
+                                                    Loading positions…
+                                                </div>
+                                            )}
+                                            <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
+                                                These are company-level roles (e.g., Owner, Finance Officer, Site Manager).
+                                            </p>
+                                        </div>
+                                    )}
+
                                 {appRole === '1_ADMIN' && (
-                                    <div
-                                        className="mt-1 rounded-md px-2 py-2 ring-1 text-sm"
-                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--sub)', borderColor: 'var(--ring)' }}
-                                    >
+                                    <div className="mt-1 rounded-md px-2 py-2 ring-1 text-sm"
+                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--sub)', borderColor: 'var(--ring)' }}>
                                         Admin has no position.
                                     </div>
                                 )}
@@ -1587,6 +1585,7 @@ function PersonRow({
                     </div>
                 )}
             </div>
+
             {!editing ? (
                 <div className="flex items-center gap-2">
                     {verifyStatus === 'pending' && (
@@ -1639,6 +1638,7 @@ function PersonRow({
         </div>
     );
 }
+
 
 function MultiSelect({
     value,

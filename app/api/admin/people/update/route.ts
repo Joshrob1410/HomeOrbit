@@ -1,443 +1,375 @@
 // app/api/admin/people/update/route.ts
-export const runtime = "nodejs";
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-import { NextRequest, NextResponse } from "next/server";
-import { getRequester } from "@/lib/requester";
+export const runtime = 'nodejs';
 
-/** Minimal row shapes used in this file */
-type HomeRow = { company_id: string };
-type HomeMembershipRow = {
-  user_id: string;
-  home_id: string;
-  role: "STAFF" | "MANAGER";
-  staff_subrole: "RESIDENTIAL" | "TEAM_LEADER" | null;
-  manager_subrole: "DEPUTY_MANAGER" | "MANAGER" | null;
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const service = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+const admin = createClient(url, service, { auth: { autoRefreshToken: false, persistSession: false } });
+
+type AppLevel = '1_ADMIN' | '2_COMPANY' | '3_MANAGER' | '4_STAFF';
+
+type UpdateBody = {
+    user_id: string;
+    full_name?: string;
+    email?: string;
+    password?: string;
+
+    set_company?: { company_id: string }; // ADMIN only
+
+    // Phase 1 compat (bank via bank_memberships)
+    set_bank?: { company_id: string; home_id?: string };
+    clear_home?: { home_id: string };
+    set_home?: { home_id: string; clear_bank_for_company?: string };
+
+    // Position assignment
+    set_home_role?: { home_id: string; role: 'STAFF' | 'TEAM_LEADER' | 'MANAGER' | 'DEPUTY_MANAGER' };
+    set_manager_homes?: { home_ids: string[] }; // replace set
+
+    // Level assignment (Admin/Company/Manager/Staff)
+    set_level?: { level: AppLevel; company_id: string | null };
+
+    // Company positions (Owner, Finance Officer, Site Manager)
+    company_positions?: string[];
 };
-type BankMembershipRow = { company_id: string };
-type CompanyMembershipRow = { company_id: string };
 
-/** Request body (all fields optional except user_id) */
-type PatchBody = {
-  user_id: string;
-  full_name?: string;
-  email?: string;
-  password?: string;
+type ProfileRow = { user_id: string; is_admin: boolean | null };
+type Home = { id: string; company_id: string };
 
-  set_home?: { home_id: string; clear_bank_for_company?: string };
-  clear_home?: { home_id: string };
-  set_bank?: { company_id: string; home_id?: string };
+function json(status: number, body: unknown) {
+    return NextResponse.json(body, { status });
+}
 
-  set_home_role?: {
-    home_id: string;
-    role: "STAFF" | "TEAM_LEADER" | "DEPUTY_MANAGER" | "MANAGER" | string;
-  };
+function assert(cond: unknown, msg: string): asserts cond {
+    if (!cond) throw new Error(msg);
+}
 
-  set_company?: { company_id: string };
+async function getViewer(req: NextRequest) {
+    const authz = req.headers.get('authorization');
+    const jwt = authz?.startsWith('Bearer ') ? authz.slice(7) : null;
 
-  set_level?: {
-    level: "1_ADMIN" | "2_COMPANY" | "3_MANAGER" | "4_STAFF" | string;
-  };
-};
+    const { data: auth } = await admin.auth.getUser(jwt ?? '');
+    const viewer = auth.user;
+    if (!viewer) {
+        return {
+            viewerId: null as string | null,
+            isAdmin: false,
+            companyIds: [] as string[],
+            managerCompanyIds: [] as string[],
+        };
+    }
+
+    // Profile (is_admin)
+    const profRes = await admin
+        .from('profiles')
+        .select('user_id,is_admin')
+        .eq('user_id', viewer.id)
+        .maybeSingle();
+
+    const isAdmin = Boolean((profRes.data as ProfileRow | null)?.is_admin);
+
+    // Company memberships (for company-level perms)
+    const cmRes = await admin
+        .from('company_memberships')
+        .select('company_id,has_company_access')
+        .eq('user_id', viewer.id);
+
+    const companyIds = (cmRes.data ?? [])
+        .filter((r) => r.has_company_access)
+        .map((r) => r.company_id);
+
+    // Manager homes → companies
+    const hmRes = await admin
+        .from('home_memberships')
+        .select('home_id,role')
+        .eq('user_id', viewer.id)
+        .eq('role', 'MANAGER');
+
+    const homeIds = (hmRes.data ?? []).map((h) => h.home_id);
+    let managerCompanyIds: string[] = [];
+    if (homeIds.length) {
+        const homesRes = await admin.from('homes').select('id,company_id').in('id', homeIds);
+        managerCompanyIds = (homesRes.data ?? []).map((h) => h.company_id);
+    }
+
+    return { viewerId: viewer.id, isAdmin, companyIds, managerCompanyIds };
+}
+
+function canManageCompany(
+    isAdmin: boolean,
+    companyId: string | null,
+    viewerCompanyIds: string[],
+    viewerManagerCompanyIds: string[],
+): boolean {
+    if (!companyId) return isAdmin; // unknown context → only admin
+    if (isAdmin) return true;
+    if (viewerCompanyIds.includes(companyId)) return true; // company access
+    if (viewerManagerCompanyIds.includes(companyId)) return true; // manager in this company
+    return false;
+}
+
+function capLevelByViewer(viewer: AppLevel): (target: AppLevel) => boolean {
+    const rank: Record<AppLevel, number> = { '1_ADMIN': 1, '2_COMPANY': 2, '3_MANAGER': 3, '4_STAFF': 4 };
+    return (target) => rank[target] >= rank[viewer];
+}
+
+async function getTargetCompanyId(userId: string): Promise<string | null> {
+    const row = await admin.from('company_memberships').select('company_id').eq('user_id', userId).maybeSingle();
+    return row.data?.company_id ?? null;
+}
+
+async function homesByCompany(companyId: string): Promise<Home[]> {
+    const res = await admin.from('homes').select('id,company_id').eq('company_id', companyId);
+    return res.data ?? [];
+}
+
+async function setCompanyForUser(userId: string, newCompanyId: string) {
+    // Remove everything tied to the old company, then move company_membership
+    const oldCompanyId = await getTargetCompanyId(userId);
+
+    // If already same company, ensure row exists and return
+    if (oldCompanyId === newCompanyId) {
+        const ensure = await admin
+            .from('company_memberships')
+            .select('user_id,company_id')
+            .eq('user_id', userId)
+            .eq('company_id', newCompanyId)
+            .maybeSingle();
+        if (!ensure.data) {
+            await admin.from('company_memberships').insert({ user_id: userId, company_id: newCompanyId });
+        }
+        return;
+    }
+
+    if (oldCompanyId) {
+        // Delete positions (old)
+        await admin.from('company_membership_positions').delete().eq('user_id', userId).eq('company_id', oldCompanyId);
+
+        // Delete BANK memberships (old)
+        await admin.from('bank_memberships').delete().eq('user_id', userId).eq('company_id', oldCompanyId);
+
+        // Delete home memberships under old company
+        const oldHomes = await homesByCompany(oldCompanyId);
+        const oldHomeIds = oldHomes.map((h) => h.id);
+        if (oldHomeIds.length) {
+            await admin.from('home_memberships').delete().eq('user_id', userId).in('home_id', oldHomeIds);
+        }
+
+        // Remove old company membership
+        await admin.from('company_memberships').delete().eq('user_id', userId).eq('company_id', oldCompanyId);
+    }
+
+    // Insert new company membership (has_company_access = false by default)
+    await admin.from('company_memberships').insert({ user_id: userId, company_id: newCompanyId, has_company_access: false });
+}
+
+type HomeRole = NonNullable<UpdateBody['set_home_role']>['role'];
+
+function splitRole(role: HomeRole): {
+    role: 'STAFF' | 'MANAGER';
+    staff_subrole: 'RESIDENTIAL' | 'TEAM_LEADER' | 'BANK' | null;
+    manager_subrole: 'MANAGER' | 'DEPUTY_MANAGER' | null;
+} {
+    switch (role) {
+        case 'STAFF':
+            return { role: 'STAFF', staff_subrole: 'RESIDENTIAL', manager_subrole: null };
+        case 'TEAM_LEADER':
+            return { role: 'STAFF', staff_subrole: 'TEAM_LEADER', manager_subrole: null };
+        case 'MANAGER':
+            return { role: 'MANAGER', staff_subrole: null, manager_subrole: 'MANAGER' };
+        case 'DEPUTY_MANAGER':
+            return { role: 'MANAGER', staff_subrole: null, manager_subrole: 'DEPUTY_MANAGER' };
+        default:
+            // Exhaustive safety (should never hit because HomeRole is a closed union)
+            return { role: 'STAFF', staff_subrole: 'RESIDENTIAL', manager_subrole: null };
+    }
+}
 
 export async function PATCH(req: NextRequest) {
-  try {
-    const r = await getRequester(req);
-    const body = (await req.json()) as PatchBody;
+    try {
+        const body = (await req.json()) as UpdateBody;
+        assert(body && typeof body.user_id === 'string', 'Missing user_id');
 
-    const {
-      user_id,
-      full_name,
-      email,
-      password,
-      set_home,
-      clear_home,
-      set_bank,
-      set_home_role,
-      set_company,
-      set_level,
-    } = body ?? ({} as PatchBody);
+        const { viewerId, isAdmin, companyIds, managerCompanyIds } = await getViewer(req);
+        if (!viewerId) return json(401, { error: 'Not authenticated' });
 
-    if (!user_id) {
-      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
-    }
+        // Determine the company context we’re editing in
+        const currentCompanyId = await getTargetCompanyId(body.user_id);
+        const requestedCompanyId = body.set_company?.company_id ?? body.set_level?.company_id ?? currentCompanyId;
 
-    // only Admin / Company / Manager can use this route
-    if (!r.isAdmin && !r.canCompany && r.level !== "3_MANAGER") {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+        // Permission gate: who can edit this target?
+        const canManage = canManageCompany(isAdmin, requestedCompanyId, companyIds, managerCompanyIds);
+        if (!canManage) return json(403, { error: 'You do not have permission to manage this user in that company.' });
 
-    const actingOwnAccount =
-      r.user?.id ? String(r.user.id) === String(user_id) : false;
+        // Additional rank caps: Company can’t change someone’s company; Manager can’t assign above Manager, etc.
+        const viewerLevel: AppLevel = isAdmin
+            ? '1_ADMIN'
+            : companyIds.includes(requestedCompanyId ?? '')
+                ? '2_COMPANY'
+                : '3_MANAGER';
+        const withinCap = capLevelByViewer(viewerLevel);
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 1) Profile name (use ADMIN client to bypass RLS) + mirror to Auth metadata
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (typeof full_name === "string" && full_name.trim()) {
-      // profiles.full_name
-      const { error: profileErr } = await r.admin
-        .from("profiles")
-        .update({ full_name: full_name.trim() })
-        .eq("user_id", user_id);
-
-      if (profileErr) {
-        return NextResponse.json({ error: profileErr.message }, { status: 400 });
-      }
-
-      // auth.user_metadata.full_name (helps the Supabase Auth UI reflect the change)
-      const { error: metaErr } = await r.admin.auth.admin.updateUserById(user_id, {
-        user_metadata: { full_name: full_name.trim() },
-      });
-      if (metaErr) {
-        return NextResponse.json({ error: metaErr.message }, { status: 400 });
-      }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 2) Email / password (via Admin API). Allowed for admin/company/manager.
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (email || password) {
-      const patch: { email?: string; password?: string } = {};
-      if (email) patch.email = String(email).trim();
-      if (password) patch.password = String(password);
-      const { error: updErr } = await r.admin.auth.admin.updateUserById(user_id, patch);
-      if (updErr) return NextResponse.json({ error: updErr.message }, { status: 400 });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 3) Admin-only: change company
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (set_company?.company_id) {
-      if (!r.isAdmin) {
-        return NextResponse.json({ error: "Only admins can change company" }, { status: 403 });
-      }
-      const { error } = await r.admin
-        .from("company_memberships")
-        .upsert({ user_id, company_id: set_company.company_id }, { onConflict: "user_id,company_id" });
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 4) Assign / move to Bank
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (set_bank?.company_id) {
-      if (r.level === "2_COMPANY" && r.companyScope && r.companyScope !== set_bank.company_id) {
-        return NextResponse.json({ error: "Cannot assign bank in another company" }, { status: 403 });
-      }
-      if (set_bank.home_id) {
-        await r.admin
-          .from("home_memberships")
-          .delete()
-          .eq("user_id", user_id)
-          .eq("home_id", set_bank.home_id);
-      }
-      const { error } = await r.admin
-        .from("bank_memberships")
-        .upsert({ user_id, company_id: set_bank.company_id }, { onConflict: "user_id,company_id" });
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 5) Clear a specific home membership
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (clear_home?.home_id) {
-      if (r.level === "3_MANAGER" && !r.managedHomeIds.includes(clear_home.home_id)) {
-        return NextResponse.json({ error: "Cannot remove from a home you don't manage" }, { status: 403 });
-      }
-      await r.admin
-        .from("home_memberships")
-        .delete()
-        .eq("user_id", user_id)
-        .eq("home_id", clear_home.home_id);
-    }
-
-    // 6) Assign to a specific home (move existing STAFF if present; insert otherwise)
-    if (set_home?.home_id) {
-      const targetHomeId: string = set_home.home_id;
-
-      // Scope checks (use admin client so RLS can't block reads)
-      if (r.level === "3_MANAGER" && !r.managedHomeIds.includes(targetHomeId)) {
-        return NextResponse.json({ error: "Managers can only assign to their managed homes" }, { status: 403 });
-      }
-      if (r.level === "2_COMPANY" && r.companyScope) {
-        const { data: h, error: homeErr } = await r.admin
-          .from("homes")
-          .select("company_id")
-          .eq("id", targetHomeId)
-          .maybeSingle()
-          .returns<HomeRow | null>();
-        if (homeErr) return NextResponse.json({ error: homeErr.message }, { status: 400 });
-        if (h?.company_id && h.company_id !== r.companyScope) {
-          return NextResponse.json({ error: "Cannot assign to a home in another company" }, { status: 403 });
+        // 1) Identity edits
+        if (typeof body.full_name === 'string') {
+            await admin.from('profiles').update({ full_name: body.full_name }).eq('user_id', body.user_id);
         }
-      }
-
-      // If asked, clear bank membership for that company (move Bank → Home)
-      if (set_home.clear_bank_for_company) {
-        const { error: delBankErr } = await r.admin
-          .from("bank_memberships")
-          .delete()
-          .eq("user_id", user_id)
-          .eq("company_id", set_home.clear_bank_for_company);
-        if (delBankErr) return NextResponse.json({ error: delBankErr.message }, { status: 400 });
-      }
-
-      // 6a) If the user already has *any* membership for the target home, do nothing.
-      {
-        const { data: existingAtTarget, error: exErr } = await r.admin
-          .from("home_memberships")
-          .select("user_id, home_id, role, staff_subrole, manager_subrole")
-          .eq("user_id", user_id)
-          .eq("home_id", targetHomeId)
-          .maybeSingle()
-          .returns<HomeMembershipRow | null>();
-        if (exErr) return NextResponse.json({ error: exErr.message }, { status: 400 });
-
-        if (existingAtTarget) {
-          // Already a member of this home; no need to add/move a STAFF row.
-          // (Position changes, if requested, will be handled in step 7.)
-        } else {
-          // 6b) See if they have a STAFF row on some other home → move it here.
-          const { data: staffElsewhere, error: staffErr } = await r.admin
-            .from("home_memberships")
-            .select("home_id")
-            .eq("user_id", user_id)
-            .eq("role", "STAFF")
-            .neq("home_id", targetHomeId)
-            .limit(1)
-            .returns<{ home_id: string }[]>();
-
-          if (staffErr) return NextResponse.json({ error: staffErr.message }, { status: 400 });
-
-          if (staffElsewhere && staffElsewhere.length) {
-            // Move the existing STAFF membership to the new home.
-            const fromHomeId = staffElsewhere[0].home_id;
-
-            // NOTE: because you likely have a unique (user_id, home_id), make sure there isn't any row at target.
-            // We already checked existingAtTarget above, so this update won't violate that constraint.
-            const { error: moveErr } = await r.admin
-              .from("home_memberships")
-              .update({
-                home_id: targetHomeId,
-                // default subroles for STAFF when moving
-                role: "STAFF",
-                staff_subrole: "RESIDENTIAL",
-                manager_subrole: null,
-              } satisfies Partial<HomeMembershipRow>)
-              .eq("user_id", user_id)
-              .eq("home_id", fromHomeId);
-
-            if (moveErr) return NextResponse.json({ error: moveErr.message }, { status: 400 });
-          } else {
-            // 6c) No STAFF row anywhere → create a new STAFF membership at the target home.
-            const { error: insErr } = await r.admin
-              .from("home_memberships")
-              .insert({
-                user_id,
-                home_id: targetHomeId,
-                role: "STAFF",
-                staff_subrole: "RESIDENTIAL",
-                manager_subrole: null,
-              } satisfies HomeMembershipRow);
-            if (insErr) return NextResponse.json({ error: insErr.message }, { status: 400 });
-          }
+        if (typeof body.email === 'string' && body.email.trim()) {
+            // Allow Admin & Company; Managers cannot change email
+            if (viewerLevel === '3_MANAGER') return json(403, { error: 'Managers cannot change email addresses.' });
+            await admin.auth.admin.updateUserById(body.user_id, { email: body.email.trim() });
         }
-      }
+        if (typeof body.password === 'string' && body.password.length >= 8) {
+            if (viewerLevel === '3_MANAGER') return json(403, { error: 'Managers cannot set passwords.' });
+            await admin.auth.admin.updateUserById(body.user_id, { password: body.password });
+        }
+
+        // 2) Company transfer (ADMIN only)
+        if (body.set_company?.company_id) {
+            if (viewerLevel !== '1_ADMIN') return json(403, { error: 'Only admins can change a user’s company.' });
+            await setCompanyForUser(body.user_id, body.set_company.company_id);
+        }
+
+        // 3) Bank / Home placement
+        if (body.set_bank) {
+            // Ensure this is within the same (requested) company
+            const targetCompany = await getTargetCompanyId(body.user_id);
+            if (targetCompany !== body.set_bank.company_id) {
+                return json(400, { error: 'Bank membership must match the user’s company.' });
+            }
+            await admin
+                .from('bank_memberships')
+                .upsert(
+                    { user_id: body.user_id, company_id: body.set_bank.company_id },
+                    { onConflict: 'user_id,company_id', ignoreDuplicates: false },
+                );
+            // No need to clear any home here; UI will clear home when BANK is chosen.
+        }
+
+        if (body.clear_home?.home_id) {
+            await admin.from('home_memberships').delete().eq('user_id', body.user_id).eq('home_id', body.clear_home.home_id);
+        }
+
+        if (body.set_home) {
+            // Optional: clear bank flag for this company when setting a fixed home
+            const clearFor = body.set_home.clear_bank_for_company;
+            if (clearFor) {
+                await admin.from('bank_memberships').delete().eq('user_id', body.user_id).eq('company_id', clearFor);
+            }
+            await admin
+                .from('home_memberships')
+                .upsert(
+                    { user_id: body.user_id, home_id: body.set_home.home_id, role: 'STAFF', staff_subrole: 'RESIDENTIAL', manager_subrole: null },
+                    { onConflict: 'home_id,user_id', ignoreDuplicates: false },
+                );
+        }
+
+        if (body.set_home_role) {
+            const { role, staff_subrole, manager_subrole } = splitRole(body.set_home_role.role);
+            await admin
+                .from('home_memberships')
+                .upsert(
+                    { user_id: body.user_id, home_id: body.set_home_role.home_id, role, staff_subrole, manager_subrole },
+                    { onConflict: 'home_id,user_id', ignoreDuplicates: false },
+                );
+        }
+
+        if (body.set_manager_homes) {
+            // Replace set for all homes in the user’s company
+            const companyId = requestedCompanyId ?? (await getTargetCompanyId(body.user_id));
+            assert(companyId, 'Company context missing for manager homes update');
+
+            const allHomes = await homesByCompany(companyId);
+            const allowedHomeIds = new Set(allHomes.map((h) => h.id));
+            const desired = (body.set_manager_homes.home_ids ?? []).filter((h) => allowedHomeIds.has(h));
+
+            // Existing manager homes
+            const current = await admin
+                .from('home_memberships')
+                .select('home_id')
+                .eq('user_id', body.user_id)
+                .eq('role', 'MANAGER');
+
+            const currentIds = new Set((current.data ?? []).map((r) => r.home_id as string));
+
+            // Inserts for new ones
+            const toInsert = desired
+                .filter((id) => !currentIds.has(id))
+                .map((id) => ({
+                    user_id: body.user_id,
+                    home_id: id,
+                    role: 'MANAGER' as const,
+                    staff_subrole: null,
+                    manager_subrole: 'MANAGER' as const,
+                }));
+            if (toInsert.length) await admin.from('home_memberships').insert(toInsert);
+
+            // Deletes for removed ones
+            const toDelete = [...currentIds].filter((id) => !desired.includes(id));
+            if (toDelete.length) {
+                await admin.from('home_memberships').delete().eq('user_id', body.user_id).in('home_id', toDelete);
+            }
+        }
+
+        // 4) Level assignment
+        if (body.set_level) {
+            const { level, company_id } = body.set_level;
+
+            // Managers cannot assign above Manager; Companies cannot assign Admin
+            if (!withinCap(level)) {
+                return json(403, { error: 'You are not allowed to assign that role.' });
+            }
+
+            if (level === '1_ADMIN') {
+                if (viewerLevel !== '1_ADMIN') return json(403, { error: 'Only admins can set admin level.' });
+                await admin.from('profiles').update({ is_admin: true }).eq('user_id', body.user_id);
+            } else {
+                // Ensure admin flag is off if demoting
+                await admin.from('profiles').update({ is_admin: false }).eq('user_id', body.user_id);
+            }
+
+            if (level === '2_COMPANY') {
+                assert(company_id, 'company_id required when setting company level');
+                await admin
+                    .from('company_memberships')
+                    .upsert(
+                        { user_id: body.user_id, company_id, has_company_access: true },
+                        { onConflict: 'user_id,company_id', ignoreDuplicates: false },
+                    );
+            } else {
+                // Remove company access flag if present (stay member of the company)
+                const companyId = requestedCompanyId ?? (await getTargetCompanyId(body.user_id));
+                if (companyId) {
+                    await admin
+                        .from('company_memberships')
+                        .update({ has_company_access: false })
+                        .eq('user_id', body.user_id)
+                        .eq('company_id', companyId);
+                }
+            }
+        }
+
+        // 5) Company positions (replace-set)
+        if (Array.isArray(body.company_positions)) {
+            const companyId = requestedCompanyId ?? (await getTargetCompanyId(body.user_id));
+            assert(companyId, 'company_id context required to set company positions');
+
+            await admin.from('company_membership_positions').delete().eq('user_id', body.user_id).eq('company_id', companyId);
+
+            if (body.company_positions.length) {
+                const rows = body.company_positions.map((pos) => ({
+                    user_id: body.user_id,
+                    company_id: companyId,
+                    position: pos,
+                }));
+                await admin.from('company_membership_positions').insert(rows);
+            }
+        }
+
+        return json(200, { ok: true });
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Failed';
+        return json(400, { error: msg });
     }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 7) Change position for an existing home membership
-    //     UI sends one of:
-    //       "STAFF" → STAFF + RESIDENTIAL
-    //       "TEAM_LEADER" → STAFF + TEAM_LEADER
-    //       "DEPUTY_MANAGER" → MANAGER + DEPUTY_MANAGER
-    //       "MANAGER" → MANAGER + MANAGER
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (set_home_role?.home_id && set_home_role?.role) {
-      if (r.level === "3_MANAGER" && !r.managedHomeIds.includes(set_home_role.home_id)) {
-        return NextResponse.json({ error: "Managers can only change positions in their homes" }, { status: 403 });
-      }
-      if (r.level === "2_COMPANY" && r.companyScope) {
-        const { data: h } = await r.admin
-          .from("homes")
-          .select("company_id")
-          .eq("id", set_home_role.home_id)
-          .maybeSingle()
-          .returns<HomeRow | null>();
-        if (h?.company_id && h.company_id !== r.companyScope) {
-          return NextResponse.json({ error: "Cannot change position in another company" }, { status: 403 });
-        }
-      }
-
-      const incoming = String(set_home_role.role).toUpperCase();
-
-      type RolePatch = {
-        role: "STAFF" | "MANAGER";
-        staff_subrole: "RESIDENTIAL" | "TEAM_LEADER" | null;
-        manager_subrole: "DEPUTY_MANAGER" | "MANAGER" | null;
-      };
-
-      let patch: RolePatch | null = null;
-      switch (incoming) {
-        case "STAFF":
-          patch = { role: "STAFF", staff_subrole: "RESIDENTIAL", manager_subrole: null };
-          break;
-        case "TEAM_LEADER":
-          patch = { role: "STAFF", staff_subrole: "TEAM_LEADER", manager_subrole: null };
-          break;
-        case "DEPUTY_MANAGER":
-          patch = { role: "MANAGER", staff_subrole: null, manager_subrole: "DEPUTY_MANAGER" };
-          break;
-        case "MANAGER":
-          patch = { role: "MANAGER", staff_subrole: null, manager_subrole: "MANAGER" };
-          break;
-        default:
-          return NextResponse.json({ error: "Invalid home role" }, { status: 400 });
-      }
-
-      const { error } = await r.admin
-        .from("home_memberships")
-        .update(patch satisfies Partial<HomeMembershipRow>)
-        .eq("user_id", user_id)
-        .eq("home_id", set_home_role.home_id);
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 8) App-level role change
-    // ─────────────────────────────────────────────────────────────────────────────
-    if (set_level?.level) {
-      if (actingOwnAccount) {
-        return NextResponse.json({ error: "You cannot change your own app role" }, { status: 403 });
-      }
-
-      const target = String(set_level.level).toUpperCase() as
-        | "1_ADMIN"
-        | "2_COMPANY"
-        | "3_MANAGER"
-        | "4_STAFF";
-
-      const RANK: Record<"1_ADMIN" | "2_COMPANY" | "3_MANAGER" | "4_STAFF", number> = {
-        "1_ADMIN": 1,
-        "2_COMPANY": 2,
-        "3_MANAGER": 3,
-        "4_STAFF": 4,
-      };
-
-      const viewerLevel =
-        r.isAdmin ? "1_ADMIN" : r.canCompany ? "2_COMPANY" : r.level === "3_MANAGER" ? "3_MANAGER" : "4_STAFF";
-      if (RANK[target] < RANK[viewerLevel]) {
-        return NextResponse.json({ error: "You are not allowed to assign that app role" }, { status: 403 });
-      }
-
-      async function deriveCompanyIdForUser(): Promise<string | null> {
-        // from home membership (joined to homes to get company_id)
-        const { data: h } = await r.admin
-          .from("home_memberships")
-          .select("home_id, homes!inner(company_id)")
-          .eq("user_id", user_id)
-          .limit(1)
-          .returns<{ home_id: string; homes: { company_id: string } }[]>();
-        const viaHome = h?.[0]?.homes?.company_id;
-        if (viaHome) return viaHome;
-
-        // from bank membership
-        const { data: b } = await r.admin
-          .from("bank_memberships")
-          .select("company_id")
-          .eq("user_id", user_id)
-          .limit(1)
-          .returns<BankMembershipRow[]>();
-        const viaBank = b?.[0]?.company_id;
-        if (viaBank) return viaBank;
-
-        // from company membership
-        const { data: cm } = await r.admin
-          .from("company_memberships")
-          .select("company_id")
-          .eq("user_id", user_id)
-          .limit(1)
-          .returns<CompanyMembershipRow[]>();
-        const viaCM = cm?.[0]?.company_id;
-        if (viaCM) return viaCM;
-
-        if (r.companyScope) return r.companyScope;
-        return null;
-      }
-
-      switch (target) {
-        case "1_ADMIN": {
-          if (!r.isAdmin) {
-            return NextResponse.json({ error: "Only admins can assign Admin role" }, { status: 403 });
-          }
-          const { error } = await r.admin
-            .from("profiles")
-            .update({ is_admin: true })
-            .eq("user_id", user_id);
-          if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-          break;
-        }
-        case "2_COMPANY": {
-          const { error: pe } = await r.admin
-            .from("profiles")
-            .update({ is_admin: false })
-            .eq("user_id", user_id);
-          if (pe) return NextResponse.json({ error: pe.message }, { status: 400 });
-
-          const cid = await deriveCompanyIdForUser();
-          if (!cid) {
-            return NextResponse.json({ error: "Cannot determine company to grant access" }, { status: 400 });
-          }
-          if (r.canCompany && r.companyScope && r.companyScope !== cid) {
-            return NextResponse.json({ error: "Cannot grant company access in another company" }, { status: 403 });
-          }
-
-          const { error: ce } = await r.admin
-            .from("company_memberships")
-            .upsert(
-              { user_id, company_id: cid, has_company_access: true },
-              { onConflict: "user_id,company_id" }
-            );
-          if (ce) return NextResponse.json({ error: ce.message }, { status: 400 });
-          break;
-        }
-        case "3_MANAGER": {
-          const { error } = await r.admin
-            .from("profiles")
-            .update({ is_admin: false })
-            .eq("user_id", user_id);
-          if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-          break;
-        }
-        case "4_STAFF": {
-          const { error: pe } = await r.admin
-            .from("profiles")
-            .update({ is_admin: false })
-            .eq("user_id", user_id);
-          if (pe) return NextResponse.json({ error: pe.message }, { status: 400 });
-
-          if (r.isAdmin) {
-            await r.admin
-              .from("company_memberships")
-              .update({ has_company_access: false })
-              .eq("user_id", user_id);
-          } else if (r.canCompany && r.companyScope) {
-            await r.admin
-              .from("company_memberships")
-              .update({ has_company_access: false })
-              .eq("user_id", user_id)
-              .eq("company_id", r.companyScope);
-          }
-          break;
-        }
-        default:
-          return NextResponse.json({ error: "Invalid app level" }, { status: 400 });
-      }
-    }
-
-    return NextResponse.json({ ok: true });
-  } catch (e: unknown) {
-    if (e instanceof Response) return e;
-    const err = e instanceof Error ? e : new Error("Unexpected error");
-    return NextResponse.json({ error: err.message }, { status: 500 });
-  }
 }
