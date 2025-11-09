@@ -1078,14 +1078,23 @@ function PersonRow({
     }, [row.user_id, row.home_id, row.is_bank]);
 
     async function prefillFromServer() {
+        // Hoisted so it's visible throughout the function
+        type CompanyMembershipRow = { company_id: string | null; positions: string[] | null } | null;
+        let companyMembership: CompanyMembershipRow = null;
+
         try {
-            const cm = await supabase
+            const { data } = await supabase
                 .from('company_memberships')
                 .select('company_id, positions')
                 .eq('user_id', row.user_id)
                 .maybeSingle();
-            if (cm.data?.company_id) setCompanyId(cm.data.company_id);
-            setCompanyPositionsEdit(asStringArray(cm.data?.positions));
+
+            companyMembership = data ?? null;
+
+            if (companyMembership?.company_id) {
+                setCompanyId(companyMembership.company_id);
+            }
+            setCompanyPositionsEdit(asStringArray(companyMembership?.positions));
         } catch {
             /* noop */
         }
@@ -1101,7 +1110,6 @@ function PersonRow({
                 return;
             }
         } catch (e) {
-            // eslint-disable-next-line no-console
             console.error('prefill: home_ids_managed_by failed', e);
         }
 
@@ -1111,6 +1119,7 @@ function PersonRow({
             manager_subrole: 'MANAGER' | 'DEPUTY_MANAGER' | null;
             staff_subrole: 'RESIDENTIAL' | 'TEAM_LEADER' | null;
         };
+
         let hmsRaw: HomeMembership[] | null = null;
         try {
             const { data } = await supabase
@@ -1119,7 +1128,6 @@ function PersonRow({
                 .eq('user_id', row.user_id);
             hmsRaw = data || [];
         } catch (e) {
-            // eslint-disable-next-line no-console
             console.warn('prefill: home_memberships blocked/failed', e);
         }
 
@@ -1138,6 +1146,7 @@ function PersonRow({
             setHomeId(deputy.home_id);
             return;
         }
+
         const teamLead = hms.find((r) => r.role === 'STAFF' && r.staff_subrole === 'TEAM_LEADER');
         if (teamLead) {
             setAppRole('4_STAFF');
@@ -1145,6 +1154,7 @@ function PersonRow({
             setHomeId(teamLead.home_id);
             return;
         }
+
         const staffAny = hms.find((r) => r.role === 'STAFF');
         if (staffAny) {
             setAppRole('4_STAFF');
@@ -1152,23 +1162,43 @@ function PersonRow({
             setHomeId(staffAny.home_id);
             return;
         }
+
         if (row.is_bank) {
             setAppRole('4_STAFF');
             setPositionEdit('BANK');
             setHomeId('');
             return;
         }
+
         if (row.home_id) {
             setAppRole('4_STAFF');
             setPositionEdit('RESIDENTIAL');
             setHomeId(row.home_id);
             return;
         }
-        // NEW: company-only member (no home, not bank, not manager/deputy/team lead)
-        if (cm.data?.company_id) {
+
+        // Fallback: company-only membership
+        if (companyMembership?.company_id) {
             setAppRole('2_COMPANY');
         }
     }
+
+
+    async function sendPasswordReset() {
+        const addr = email.trim();
+        if (!addr) {
+            alert('No email address on file.');
+            return;
+        }
+        try {
+            // optional: include redirectTo if you use a custom reset page
+            await supabase.auth.resetPasswordForEmail(addr);
+            alert('Password reset email sent.');
+        } catch (e) {
+            alert('Failed to send reset. Please try again.');
+        }
+    }
+
 
     const canEditName = isAdmin || isCompany || isManager;
     const canEditEmail = canEditName;
@@ -1203,8 +1233,19 @@ function PersonRow({
 
     async function handleEditClick() {
         await prefillFromServer();
+
+        // Prefill email from server (service role -> auth.users)
+        try {
+            const res = await authFetch(`/api/admin/people/email?user_id=${row.user_id}`);
+            if (res.ok) {
+                const j = await res.json();
+                if (typeof j?.email === 'string') setEmail(j.email);
+            }
+        } catch {/* noop */ }
+
         setEditing(true);
     }
+
 
     async function save() {
         setSaving(true);
