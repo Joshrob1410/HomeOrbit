@@ -1,4 +1,5 @@
-﻿import Link from 'next/link';
+﻿// app/(app)/layout.tsx — AFTER
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import Image from 'next/image';
 import { cookies } from 'next/headers';
@@ -11,6 +12,7 @@ import MobileSidebar from './_components/MobileSidebar';
 import LicenseGate from './_components/LicenseGate';
 import ThemeToggle from './_components/ThemeToggle';
 import ThemeCSSBridge from './_components/ThemeCSSBridge';
+import AnnouncementsSidebar from './_components/AnnouncementsSidebar'; // NEW
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -21,7 +23,6 @@ const TOKENS = {
     ORBIT: {
         pageBg:
             'linear-gradient(180deg, rgba(20,26,48,0.96) 0%, rgba(14,19,36,0.96) 60%, rgba(12,17,30,0.96) 100%)',
-        // Match client tokens
         ring: 'rgba(148,163,184,0.22)',
         ink: '#E5E7EB',
         sub: '#94A3B8',
@@ -157,12 +158,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                     }}
                 />
             </header>
-
             <Sidebar orbitInitial={orbitEnabled} />
+            <AnnouncementsSidebar /> {/* right-hand announcements rail (fixed, 2xl+) */}
 
             <main className="px-4 py-6 lg:pl-72">
                 <div className="mx-auto max-w-6xl">{children}</div>
             </main>
+
         </div>
     );
 }
