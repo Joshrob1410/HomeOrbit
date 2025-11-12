@@ -236,7 +236,7 @@ export default function HelpCentrePage() {
 function ContactUs() {
     const [revealed, setRevealed] = useState(false);
     const [copied, setCopied] = useState(false);
-    const email = 'joshrob1410@aol.co.uk';
+    const email = 'support@homeorbit.co.uk';
 
     async function copy(): Promise<void> {
         try {
