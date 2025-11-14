@@ -17,7 +17,6 @@ type Body = {
 
     company_positions?: CompanyPosition[];
 
-    // Home-level memberships (optional)
     manager_home_ids?: string[];
     manager_subrole?: 'MANAGER' | 'DEPUTY_MANAGER' | null;
 
@@ -29,7 +28,7 @@ type Body = {
 
 const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!, // server-only
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
@@ -56,57 +55,72 @@ export async function POST(req: NextRequest) {
         } = body;
 
         if (!email) {
-            return NextResponse.json({ error: 'Email is required' }, { status: 400 });
+            return NextResponse.json(
+                { ok: false, error: 'Email is required' },
+                { status: 400 }
+            );
         }
 
-        // Decide origin for redirect
+        // Compute origin (prefer NEXT_PUBLIC_SITE_URL in production)
         const envUrl = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, '') ?? null;
         const forwardedProto = req.headers.get('x-forwarded-proto') ?? 'https';
         const host =
             req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? '';
         const origin = envUrl || `${forwardedProto}://${host}`;
+        const welcomeUrl = `${origin}/auth/welcome`;
 
-        // 1) Send the invite – Supabase builds the email link
+        // 1) Send invite – Supabase + SES handle the actual email
         const { data: invite, error: inviteErr } =
             await admin.auth.admin.inviteUserByEmail(email, {
                 data: { full_name: full_name ?? undefined },
-                redirectTo: `${origin}/auth/welcome`,
+                redirectTo: welcomeUrl,
             });
 
         if (inviteErr) {
-            return NextResponse.json({ error: inviteErr.message }, { status: 400 });
+            return NextResponse.json(
+                { ok: false, error: inviteErr.message },
+                { status: 400 }
+            );
         }
 
         const userId = invite.user.id;
 
-        // 2) Upsert profile
+        // 2) Profile
         {
-            const { error } = await admin.from('profiles').upsert(
-                { user_id: userId, full_name, is_admin: false },
-                { onConflict: 'user_id' }
-            );
+            const { error } = await admin
+                .from('profiles')
+                .upsert(
+                    { user_id: userId, full_name, is_admin: false },
+                    { onConflict: 'user_id' }
+                );
             if (error) throw error;
         }
 
-        // If no company bound, we're done
+        // 3) If no company specified, return early
         if (!company_id) {
-            return NextResponse.json({ ok: true, userId });
+            return NextResponse.json({
+                ok: true,
+                userId,
+                message: 'Invite sent and profile created (no company linked).',
+            });
         }
 
-        // 3) Company membership
+        // 4) Company membership
         {
-            const { error } = await admin.from('company_memberships').upsert(
-                {
-                    user_id: userId,
-                    company_id,
-                    has_company_access: !!has_company_access,
-                },
-                { onConflict: 'company_id,user_id' }
-            );
+            const { error } = await admin
+                .from('company_memberships')
+                .upsert(
+                    {
+                        user_id: userId,
+                        company_id,
+                        has_company_access: !!has_company_access,
+                    },
+                    { onConflict: 'company_id,user_id' }
+                );
             if (error) throw error;
         }
 
-        // 4) Company positions
+        // 5) Company positions
         if (company_positions.length) {
             const rows = company_positions.map((position) => ({
                 user_id: userId,
@@ -121,7 +135,7 @@ export async function POST(req: NextRequest) {
             if (error) throw error;
         }
 
-        // 5) Bank membership
+        // 6) Bank membership
         if (is_bank) {
             const { error } = await admin
                 .from('bank_memberships')
@@ -132,7 +146,7 @@ export async function POST(req: NextRequest) {
             if (error) throw error;
         }
 
-        // 6) Manager in multiple homes
+        // 7) Manager in multiple homes
         if (Array.isArray(manager_home_ids) && manager_home_ids.length) {
             const rows = manager_home_ids.map((home_id) => ({
                 user_id: userId,
@@ -148,23 +162,29 @@ export async function POST(req: NextRequest) {
             if (error) throw error;
         }
 
-        // 7) Staff in a single home
+        // 8) Staff in a single home
         if (staff_home_id) {
-            const { error } = await admin.from('home_memberships').upsert(
-                {
-                    user_id: userId,
-                    home_id: staff_home_id,
-                    role: 'STAFF',
-                    staff_subrole: staff_subrole ?? 'RESIDENTIAL',
-                },
-                { onConflict: 'user_id,home_id' }
-            );
+            const { error } = await admin
+                .from('home_memberships')
+                .upsert(
+                    {
+                        user_id: userId,
+                        home_id: staff_home_id,
+                        role: 'STAFF',
+                        staff_subrole: staff_subrole ?? 'RESIDENTIAL',
+                    },
+                    { onConflict: 'user_id,home_id' }
+                );
             if (error) throw error;
         }
 
-        return NextResponse.json({ ok: true, userId });
+        return NextResponse.json({
+            ok: true,
+            userId,
+            message: 'Invite sent and access configured.',
+        });
     } catch (e) {
         const message = e instanceof Error ? e.message : String(e ?? 'Failed');
-        return NextResponse.json({ error: message }, { status: 500 });
+        return NextResponse.json({ ok: false, error: message }, { status: 500 });
     }
 }
