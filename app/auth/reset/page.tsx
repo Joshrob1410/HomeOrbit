@@ -1,4 +1,4 @@
-// app/auth/reset/page.tsx
+ï»¿// app/auth/reset/page.tsx
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
@@ -232,7 +232,7 @@ export default function ResetPasswordPage() {
             <div className="min-h-svh flex items-center justify-center px-4" style={bgStyle}>
                 <div className="max-w-md w-full text-center text-white/80">
                     <BigLogo />
-                    <p className="mt-6 text-sm">Checking your reset link…</p>
+                    <p className="mt-6 text-sm">Checking your reset linkâ€¦</p>
                 </div>
             </div>
         );
@@ -244,7 +244,7 @@ export default function ResetPasswordPage() {
                 <div className="w-full max-w-md rounded-2xl bg-white/5 backdrop-blur-xl p-6 text-white ring-1 ring-white/10">
                     <BigLogo />
                     <h1 className="mt-4 text-xl font-semibold tracking-tight">
-                        We couldn’t finish resetting your password
+                        We couldnâ€™t finish resetting your password
                     </h1>
                     <p className="mt-3 text-sm text-white/75">
                         {errorMsg || 'Something went wrong. Your reset link may have expired or already been used.'}
@@ -312,7 +312,7 @@ export default function ResetPasswordPage() {
                             disabled={!canSavePw || saving}
                             className="mt-3 w-full rounded-xl bg-gradient-to-r from-[#7C3AED] via-[#6366F1] to-[#3B82F6] py-2.5 text-[15px] font-semibold text-white shadow-[0_10px_25px_rgba(79,70,229,0.35)] hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-[rgba(99,102,241,0.6)] disabled:opacity-60"
                         >
-                            {saving ? 'Updating…' : 'Update password'}
+                            {saving ? 'Updatingâ€¦' : 'Update password'}
                         </button>
 
                         <p className="mt-3 text-[11px] text-white/60">
