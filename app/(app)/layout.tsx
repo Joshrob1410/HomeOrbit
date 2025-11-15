@@ -1,4 +1,5 @@
-﻿// app/(app)/layout.tsx — AFTER
+﻿// app/(app)/layout.tsx
+
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import Image from 'next/image';
@@ -12,7 +13,6 @@ import MobileSidebar from './_components/MobileSidebar';
 import LicenseGate from './_components/LicenseGate';
 import ThemeToggle from './_components/ThemeToggle';
 import ThemeCSSBridge from './_components/ThemeCSSBridge';
-import AnnouncementsSidebar from './_components/AnnouncementsSidebar'; // NEW
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -77,13 +77,16 @@ function buildCssVars(orbit: boolean): React.CSSProperties {
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
     const supabase = await getServerSupabase();
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
     if (!user) redirect('/auth/login');
 
     // 1) Read cookie first
     const cookieStore = await cookies();
     const cookieVal = cookieStore.get('orbit')?.value;
-    const cookieOrbit = cookieVal === '1' ? true : cookieVal === '0' ? false : undefined;
+    const cookieOrbit =
+        cookieVal === '1' ? true : cookieVal === '0' ? false : undefined;
 
     // 2) Read DB pref
     let dbOrbit: boolean | undefined;
@@ -127,8 +130,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 <div className="mx-auto max-w-6xl px-4 h-14 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <MobileSidebar orbitInitial={orbitEnabled} />
-                        <Link href="/dashboard" className="inline-flex items-center gap-2">
-                            <div className="h-8 w-8 rounded-xl overflow-hidden shadow-sm ring-2 ring-white/70" aria-hidden>
+                        <Link
+                            href="/dashboard"
+                            className="inline-flex items-center gap-2"
+                        >
+                            <div
+                                className="h-8 w-8 rounded-xl overflow-hidden shadow-sm ring-2 ring-white/70"
+                                aria-hidden
+                            >
                                 <Image
                                     src="/logo.png"
                                     alt="HomeOrbit logo"
@@ -138,7 +147,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                                     priority
                                 />
                             </div>
-                            <span className="font-semibold" style={{ color: 'var(--ink)' }}>
+                            <span
+                                className="font-semibold"
+                                style={{ color: 'var(--ink)' }}
+                            >
                                 HomeOrbit
                             </span>
                         </Link>
@@ -158,13 +170,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                     }}
                 />
             </header>
+
             <Sidebar orbitInitial={orbitEnabled} />
-            <AnnouncementsSidebar /> {/* right-hand announcements rail (fixed, 2xl+) */}
 
             <main className="px-4 py-6 lg:pl-72">
                 <div className="mx-auto max-w-6xl">{children}</div>
             </main>
-
         </div>
     );
 }
