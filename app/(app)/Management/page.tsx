@@ -1212,13 +1212,25 @@ function PersonRow({
             alert('No email address on file.');
             return;
         }
+
         try {
-            await supabase.auth.resetPasswordForEmail(addr);
+            const res = await authFetch('/api/admin/people/reset-password', {
+                method: 'POST',
+                body: JSON.stringify({ email: addr }),
+            });
+
+            if (!res.ok) {
+                const j = (await res.json().catch(() => ({}))) as { error?: string };
+                alert(j?.error || 'Failed to send reset. Please try again.');
+                return;
+            }
+
             alert('Password reset email sent.');
         } catch {
             alert('Failed to send reset. Please try again.');
         }
     }
+
 
     async function handleEditClick() {
         await prefillFromServer();
