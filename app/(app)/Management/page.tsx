@@ -229,6 +229,7 @@ function PeopleTab({
     // Create form
     const [creating, setCreating] = useState(false);
     const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+    const [inviteError, setInviteError] = useState<string | null>(null);
     const [role, setRole] = useState<AppLevel>('4_STAFF');
     const [isAdminRole, setIsAdminRole] = useState(false);
 
@@ -519,8 +520,11 @@ function PeopleTab({
         e.preventDefault();
         setCreating(true);
         setInviteMsg(null);
+        setInviteError(null); // NEW
         try {
-            if (!fullName.trim() || !email.trim()) throw new Error('Name and email are required');
+            if (!fullName.trim() || !email.trim()) {
+                throw new Error('Name and email are required');
+            }
 
             const isManagerManager = !isAdminRole && role === '3_MANAGER' && position === 'MANAGER';
 
@@ -553,7 +557,10 @@ function PeopleTab({
                 method: 'POST',
                 body: JSON.stringify(payload),
             });
-            if (!res.ok) throw new Error((await res.json())?.error || 'Failed to send invite');
+            if (!res.ok) {
+                const j = (await res.json().catch(() => ({}))) as { error?: string };
+                throw new Error(j?.error || 'Failed to send invite');
+            }
 
             // reset form
             setFullName('');
@@ -567,11 +574,12 @@ function PeopleTab({
             setInviteMsg('Invite sent. They’ll appear as “Pending verification” until they verify.');
             await resetAndLoad();
         } catch (err) {
-            alert(err instanceof Error ? err.message : 'Failed');
+            setInviteError(err instanceof Error ? err.message : 'Failed to send invite'); // NEW
         } finally {
             setCreating(false);
         }
     }
+
 
     async function resendInvite(user_id: string) {
         const res = await authFetch('/api/admin/people/resend-invite', {
@@ -817,6 +825,18 @@ function PeopleTab({
                         <span className="ml-3 text-[12px]" style={{ color: 'var(--sub)' }}>
                             We’ll email them a link to verify and set their password.
                         </span>
+
+                        {/* NEW: inline messages */}
+                        {inviteMsg && (
+                            <div className="mt-1 text-[12px]" style={{ color: '#22c55e' }}>
+                                {inviteMsg}
+                            </div>
+                        )}
+                        {inviteError && (
+                            <div className="mt-1 text-[12px]" style={{ color: '#f97373' }}>
+                                {inviteError}
+                            </div>
+                        )}
                     </div>
 
                 </form>
@@ -959,6 +979,11 @@ function PersonRow({
     const allowHomeEdits = !isCompanyLevel && !isAdminLevel; // homes only for Staff/Manager
     const [companyPosOptions, setCompanyPosOptions] = useState<string[]>([]);
 
+    const [resetSending, setResetSending] = useState(false);
+    const [resetMsg, setResetMsg] = useState<string | null>(null);
+    const [resetError, setResetError] = useState<string | null>(null);
+
+
     // Load options when editing a COMPANY-level user
     useEffect(() => {
         let cancelled = false;
@@ -1012,11 +1037,21 @@ function PersonRow({
     }, [bankMode, homeId]);
 
     // ===== Permissions (unchanged) =====
-    const canEditName = isAdmin || isCompany || isManager;
-    const canEditEmail = canEditName;
-    const canEditPassword = canEditName;
+    // ===== Permissions =====
+    // Identity can only be changed by Admin
+    const canEditName = isAdmin;
+    const canEditEmail = isAdmin;
+
+    // Others can still *see* the email, but not edit it
+    const canViewEmail = isAdmin || isCompany || isManager;
+
+    // Who is allowed to send password resets
+    // (change this to `isAdmin || isCompany || isManager` if you ever want managers to do it too)
+    const canSendPasswordReset = isAdmin || isCompany;
+
     const canChangeCompany = isAdmin;
     const canChangeHome = isAdmin || isCompany || isManager;
+
 
     const LEVEL_RANK: Record<AppLevel, number> = {
         '1_ADMIN': 1, '2_COMPANY': 2, '3_MANAGER': 3, '4_STAFF': 4,
@@ -1209,9 +1244,16 @@ function PersonRow({
     async function sendPasswordReset() {
         const addr = email.trim();
         if (!addr) {
-            alert('No email address on file.');
+            setResetError('No email address on file.');
+            setResetMsg(null);
             return;
         }
+
+        if (resetSending) return; // guard against double-clicks
+
+        setResetSending(true);
+        setResetMsg(null);
+        setResetError(null);
 
         try {
             const res = await authFetch('/api/admin/people/reset-password', {
@@ -1220,16 +1262,27 @@ function PersonRow({
             });
 
             if (!res.ok) {
-                const j = (await res.json().catch(() => ({}))) as { error?: string };
-                alert(j?.error || 'Failed to send reset. Please try again.');
+                let msg = 'Failed to send reset. Please try again.';
+                try {
+                    const j = await res.json();
+                    if (j && typeof j === 'object' && 'error' in j && typeof (j as { error?: string }).error === 'string') {
+                        msg = (j as { error: string }).error;
+                    }
+                } catch {
+                    // ignore JSON parse errors; keep default message
+                }
+                setResetError(msg);
                 return;
             }
 
-            alert('Password reset email sent.');
+            setResetMsg('Password reset email sent.');
         } catch {
-            alert('Failed to send reset. Please try again.');
+            setResetError('Failed to send reset. Please try again.');
+        } finally {
+            setResetSending(false);
         }
     }
+
 
 
     async function handleEditClick() {
@@ -1406,33 +1459,49 @@ function PersonRow({
                                 />
                             </div>
                         )}
-                        {canEditEmail && (
-                            <div className="md:col-span-2">
-                                <label className="block text-xs" style={{ color: 'var(--ink)' }}>Email</label>
-                                <div className="mt-1 flex gap-2">
-                                    <input
-                                        className="w-full rounded-md px-2 py-2 ring-1 text-sm"
-                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                        value={email}
-                                        onChange={(e) => setEmail(e.target.value)}
-                                        placeholder="user@example.com"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={sendPasswordReset}
-                                        className="rounded-md px-3 py-2 text-sm ring-1"
-                                        style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                                        title="Email a password reset link to this address"
-                                        disabled={!email.trim()}
-                                    >
-                                        Send password reset
-                                    </button>
+                            {canViewEmail && (
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs" style={{ color: 'var(--ink)' }}>Email</label>
+                                    <div className="mt-1 flex gap-2">
+                                        <input
+                                            className="w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                            value={email}
+                                            onChange={(e) => setEmail(e.target.value)}
+                                            placeholder="user@example.com"
+                                            readOnly={!canEditEmail}
+                                            aria-readonly={!canEditEmail}
+                                        />
+                                        {canSendPasswordReset && (
+                                            <button
+                                                type="button"
+                                                onClick={sendPasswordReset}
+                                                className="rounded-md px-3 py-2 text-sm ring-1"
+                                                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                                title="Email a password reset link to this address"
+                                                disabled={!email.trim() || resetSending}
+                                            >
+                                                {resetSending ? 'Sending…' : 'Send password reset'}
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
+                                        We’ll email a reset link using your Supabase project’s mailer.
+                                    </p>
+
+                                    {/* Inline status for reset */}
+                                    {resetMsg && (
+                                        <p className="text-[11px] mt-1" style={{ color: '#22c55e' }}>
+                                            {resetMsg}
+                                        </p>
+                                    )}
+                                    {resetError && (
+                                        <p className="text-[11px] mt-1" style={{ color: '#f97373' }}>
+                                            {resetError}
+                                        </p>
+                                    )}
                                 </div>
-                                <p className="text-[11px] mt-1" style={{ color: 'var(--sub)' }}>
-                                    We’ll email a reset link using your Supabase project’s mailer.
-                                </p>
-                            </div>
-                        )}
+                            )}
                         {canChangeCompany && (
                             <div>
                                 <label className="block text-xs" style={{ color: 'var(--ink)' }}>Company (admin only)</label>
