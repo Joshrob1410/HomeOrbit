@@ -124,6 +124,22 @@ export default function LoginPage() {
     const year = useMemo(() => new Date().getFullYear(), []);
     const logoBg = useImageBgColor('/logo.png', SPACE.bgDeep);
 
+    // 🔴 NEW: bounce invite/magic-link flows from /auth/login → /auth/welcome
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+
+        const hash = window.location.hash || '';
+        const hasTokenBits = hash.includes('access_token') || hash.includes('refresh_token');
+        const isInvite = hash.includes('type=invite');
+
+        if (hasTokenBits && isInvite) {
+            const search = window.location.search || '';
+            const newUrl = `/auth/welcome${search}${hash}`;
+            router.replace(newUrl);
+        }
+    }, [router]);
+
+    // Existing: load recent emails from localStorage
     useEffect(() => {
         try {
             const raw = localStorage.getItem(LS_KEY);
