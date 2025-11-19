@@ -171,7 +171,9 @@ export default function AnnualLeavePage() {
 
             {tab === 'MY' && <MyLeave isManager={isManager} />}
             {tab === 'MANAGE' && showManage && <ManageLeave />}
-            {tab === 'SETTINGS' && showSettings && <LeaveSettingsTab isAdmin={isAdmin} />}
+            {tab === 'SETTINGS' && showSettings && (
+                <LeaveSettingsTab isAdmin={isAdmin} isCompany={isCompany} />
+            )}
 
             {/* Orbit-only select fixes (same block as Payslips) */}
             <style jsx global>{`
@@ -474,36 +476,49 @@ function ManageLeave() {
     }, [homeId]);
 
     // people + overrides
+    // people + overrides
     useEffect(() => {
         (async () => {
             setPeople([]); setOverrides(new Map()); setOvDraft(new Map());
             if (!homeId || !isManager) return;
 
-            const staff = await supabase.rpc('home_staff_for_ui', { p_home_id: homeId, include_bank: true });
-            const ids: string[] = ((staff.data || []) as { user_id: string }[]).map(x => x.user_id);
+            // Bank staff are no longer shown in the Manage tab overrides list
+            const staff = await supabase.rpc('home_staff_for_ui', {
+                p_home_id: homeId,
+                include_bank: false,
+            });
+            const ids: string[] = ((staff.data || []) as { user_id: string }[]).map((x) => x.user_id);
             if (!ids.length) return;
 
             const prof = await supabase.from('profiles').select('user_id, full_name').in('user_id', ids);
             const plist: Person[] = (prof.data || []).map((p: { user_id: string; full_name: string | null }) => ({
-                user_id: p.user_id, full_name: p.full_name
+                user_id: p.user_id,
+                full_name: p.full_name,
             })) as Person[];
             setPeople(plist);
 
             const ov = await supabase.rpc('leave_overrides_for_home', { p_home: homeId });
             const map = new Map<string, OvRow>();
             (ov.data || []).forEach((row: { user_id: string; unit: 'HOURS' | 'DAYS'; opening_remaining: number }) => {
-                map.set(row.user_id, { unit: row.unit, opening_remaining: Number(row.opening_remaining) });
+                map.set(row.user_id, {
+                    unit: row.unit,
+                    opening_remaining: Number(row.opening_remaining),
+                });
             });
             setOverrides(map);
 
             const d = new Map<string, { unit: 'HOURS' | 'DAYS'; remaining: string }>();
             ids.forEach((id) => {
                 const cur = map.get(id);
-                d.set(id, { unit: (cur?.unit ?? 'HOURS') as 'HOURS' | 'DAYS', remaining: cur ? String(cur.opening_remaining) : '' });
+                d.set(id, {
+                    unit: (cur?.unit ?? 'HOURS') as 'HOURS' | 'DAYS',
+                    remaining: cur ? String(cur.opening_remaining) : '',
+                });
             });
             setOvDraft(d);
         })();
     }, [homeId, isManager]);
+
 
     // approve / reject WITHOUT popup; notes inline
     async function decideWithReason(request: LeaveRequest, decision: 'APPROVED' | 'REJECTED', notes?: string) {
@@ -1087,13 +1102,28 @@ function LeaveCalendarModal({
 /* =========================
    Settings (admin-only company picker; show company name for others)
    ========================= */
-function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
+function LeaveSettingsTab({ isAdmin, isCompany }: { isAdmin: boolean; isCompany: boolean }) {
     const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
     const [companyId, setCompanyId] = useState('');
     const [companyName, setCompanyName] = useState<string>('');
     const [settings, setSettings] = useState<LeaveSettings | null>(null);
     const [rules, setRules] = useState<LeaveRule[]>([]);
     const [busy, setBusy] = useState(false);
+
+    // Inline edit state for a single rule row
+    const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+    const [editRuleDraft, setEditRuleDraft] = useState<{
+        name: string;
+        unit: 'HOURS' | 'DAYS';
+        applies_to: 'ALL' | 'STAFF' | 'BANK' | 'MANAGER';
+        annual_allowance: string;
+    }>({
+        name: '',
+        unit: 'HOURS',
+        applies_to: 'ALL',
+        annual_allowance: '',
+    });
+    const [editBusy, setEditBusy] = useState(false);
 
     // Inline "Add rule" form
     const [newRuleName, setNewRuleName] = useState('');
@@ -1102,12 +1132,14 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
     const [newRuleAmount, setNewRuleAmount] = useState<number | ''>('');
 
     // Assignments state
+    // Assignments state
     type Person = { user_id: string; full_name: string | null };
     const [homes, setHomes] = useState<{ id: string; name: string; company_id: string }[]>([]);
     const [assignHomeId, setAssignHomeId] = useState('');
     const [people, setPeople] = useState<Person[]>([]);
     const [assignments, setAssignments] = useState<Map<string, string | null>>(new Map());
     const [assignBusy, setAssignBusy] = useState<string | null>(null);
+    const [assignSearch, setAssignSearch] = useState('');
 
     // Overrides state
     type OverrideRow = { user_id: string; unit: 'HOURS' | 'DAYS'; opening_remaining: number };
@@ -1189,18 +1221,24 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
     }, [companyId, isAdmin]);
 
     // Load people for selected home + assignments + overrides
+    // Load people for selected home + assignments + overrides
     useEffect(() => {
         (async () => {
             setPeople([]); setAssignments(new Map()); setOverrides(new Map()); setOvDraft(new Map());
             if (!assignHomeId || !companyId) return;
 
-            const staff = await supabase.rpc('home_staff_for_ui', { p_home_id: assignHomeId, include_bank: true });
-            const ids: string[] = ((staff.data || []) as { user_id: string }[]).map(x => x.user_id);
+            const staff = await supabase.rpc('home_staff_for_ui', {
+                p_home_id: assignHomeId,
+                // Bank staff only visible here for company-level users
+                include_bank: isCompany,
+            });
+            const ids: string[] = ((staff.data || []) as { user_id: string }[]).map((x) => x.user_id);
             if (!ids.length) return;
 
             const prof = await supabase.from('profiles').select('user_id, full_name').in('user_id', ids);
             const plist: Person[] = (prof.data || []).map((p: { user_id: string; full_name: string | null }) => ({
-                user_id: p.user_id, full_name: p.full_name
+                user_id: p.user_id,
+                full_name: p.full_name,
             })) as Person[];
             setPeople(plist);
 
@@ -1210,24 +1248,33 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                 .select('user_id, rule_id')
                 .eq('company_id', companyId)
                 .in('user_id', ids);
-            (ur.data || []).forEach((row: { user_id: string; rule_id: string | null }) => map.set(row.user_id, row.rule_id));
+            (ur.data || []).forEach((row: { user_id: string; rule_id: string | null }) =>
+                map.set(row.user_id, row.rule_id),
+            );
             setAssignments(map);
 
             const ov = await supabase.rpc('leave_overrides_for_home', { p_home: assignHomeId });
             const ovMap = new Map<string, OverrideRow>();
             (ov.data || []).forEach((row: { user_id: string; unit: 'HOURS' | 'DAYS'; opening_remaining: number }) => {
-                ovMap.set(row.user_id, { user_id: row.user_id, unit: row.unit, opening_remaining: Number(row.opening_remaining) });
+                ovMap.set(row.user_id, {
+                    user_id: row.user_id,
+                    unit: row.unit,
+                    opening_remaining: Number(row.opening_remaining),
+                });
             });
             setOverrides(ovMap);
 
             const draftMap = new Map<string, { unit: 'HOURS' | 'DAYS'; remaining: string }>();
             ids.forEach((id) => {
                 const cur = ovMap.get(id);
-                draftMap.set(id, { unit: (cur?.unit ?? 'HOURS') as 'HOURS' | 'DAYS', remaining: cur ? String(cur.opening_remaining) : '' });
+                draftMap.set(id, {
+                    unit: (cur?.unit ?? 'HOURS') as 'HOURS' | 'DAYS',
+                    remaining: cur ? String(cur.opening_remaining) : '',
+                });
             });
             setOvDraft(draftMap);
         })();
-    }, [assignHomeId, companyId, settings?.tax_year_start_month]);
+    }, [assignHomeId, companyId, settings?.tax_year_start_month, isCompany]);
 
     // Save settings (April fixed)
     async function saveSettings(patch: Partial<LeaveSettings>) {
@@ -1237,8 +1284,9 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
             p_company: companyId,
             p_tax_month: 4,
             p_unit: settings?.unit ?? 'HOURS',
-            p_carry: patch.carryover_limit ?? settings?.carryover_limit ?? null,
-            p_require_mgr: patch.require_manager_approval ?? settings?.require_manager_approval ?? true,
+            // Carryover + manager approval are now fixed by policy
+            p_carry: null,
+            p_require_mgr: true,
             p_rota_shift: ('rota_shift_type_id' in patch ? patch.rota_shift_type_id : settings?.rota_shift_type_id) ?? null,
         });
         setBusy(false);
@@ -1273,10 +1321,73 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
         setRules(rules.map((r) => (r.id === rule.id ? { ...r, is_active: v } : r)));
     }
 
+    // --- Inline rule editing ---
+
+    function startEditRule(rule: LeaveRule) {
+        setEditingRuleId(rule.id);
+        setEditRuleDraft({
+            name: rule.name,
+            unit: rule.unit as 'HOURS' | 'DAYS',
+            applies_to: rule.applies_to as 'ALL' | 'STAFF' | 'BANK' | 'MANAGER',
+            annual_allowance: String(rule.annual_allowance ?? ''),
+        });
+    }
+
+    function cancelEditRule() {
+        setEditingRuleId(null);
+        setEditRuleDraft({
+            name: '',
+            unit: 'HOURS',
+            applies_to: 'ALL',
+            annual_allowance: '',
+        });
+    }
+
+    async function saveEditedRule(ruleId: string) {
+        if (!companyId) return;
+
+        const name = editRuleDraft.name.trim();
+        if (!name) {
+            alert('Enter a rule name.');
+            return;
+        }
+
+        const amt = Number(editRuleDraft.annual_allowance);
+        if (!Number.isFinite(amt) || amt <= 0) {
+            alert('Enter a positive amount.');
+            return;
+        }
+
+        setEditBusy(true);
+        try {
+            const { data, error } = await supabase.rpc('leave_rule_update', {
+                p_rule: ruleId,
+                p_name: name,
+                p_unit: editRuleDraft.unit,
+                p_annual: amt,
+                p_applies: editRuleDraft.applies_to,
+            });
+
+            if (error) throw error;
+
+            const updated = data as LeaveRule;
+            setRules((prev) =>
+                prev.map((r) => (r.id === ruleId ? updated : r)),
+            );
+            cancelEditRule();
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : 'Failed to save changes';
+            alert(msg);
+        } finally {
+            setEditBusy(false);
+        }
+    }
+
     // Set/clear assignment for a person
     async function setPersonRule(userId: string, ruleId: string | '') {
         if (!companyId) return;
         setAssignBusy(userId);
+
         try {
             if (!ruleId) {
                 await supabase.from('leave_user_rules').delete().eq('user_id', userId).eq('company_id', companyId);
@@ -1355,6 +1466,13 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
         }
     }
 
+    const filteredPeople = people.filter((p) => {
+        if (!assignSearch.trim()) return true;
+        const name = (p.full_name || '').toLowerCase();
+        return name.includes(assignSearch.trim().toLowerCase());
+    });
+
+
     return (
         <div className="space-y-4 max-w-6xl">
             <Section title="Company">
@@ -1383,8 +1501,8 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                 </div>
             </Section>
 
-            <Section title="Tax year & approvals">
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+            <Section title="Tax year & rota link">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
                     <div>
                         <label className="block text-xs text-gray-600 mb-1">Tax year start</label>
                         <input
@@ -1395,36 +1513,8 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                         />
                     </div>
 
-                    <div>
-                        <label className="block text-xs text-gray-600 mb-1">Carryover limit (hours)</label>
-                        <input
-                            type="number"
-                            min={0}
-                            step={0.5}
-                            className="w-full rounded-md px-2 py-2 ring-1"
-                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                            value={settings?.carryover_limit ?? ''}
-                            placeholder="none"
-                            onChange={(e) =>
-                                saveSettings({ carryover_limit: e.target.value === '' ? null : Number(e.target.value) })
-                            }
-                        />
-                    </div>
-
-                    <div>
-                        <label className="block text-xs text-gray-600 mb-1">Require manager approval</label>
-                        <label className="inline-flex items-center gap-2 text-sm">
-                            <input
-                                type="checkbox"
-                                checked={settings?.require_manager_approval ?? true}
-                                onChange={(e) => saveSettings({ require_manager_approval: e.target.checked })}
-                            />
-                            Yes, approval required
-                        </label>
-                    </div>
-
                     {/* Link to rota shift type */}
-                    <div>
+                    <div className="sm:col-span-2">
                         <label className="block text-xs text-gray-600 mb-1">Link to rota shift type</label>
                         <select
                             className="w-full rounded-md px-2 py-2 ring-1"
@@ -1440,7 +1530,7 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                             {shiftTypes
                                 .slice()
                                 .sort((a, b) => (a.code || '').localeCompare(b.code || ''))
-                                .map(st => (
+                                .map((st) => (
                                     <option key={st.id} value={st.id}>
                                         {st.code} — {st.label}
                                     </option>
@@ -1454,6 +1544,7 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
 
                 <p className="mt-2 text-xs text-gray-500">
                     Rules define allowances in <b>hours</b> or <b>days</b> per tax year (April–March).
+                    Approval is always required for leave requests.
                 </p>
             </Section>
 
@@ -1540,35 +1631,152 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                             </tr>
                         </thead>
                         <tbody>
-                            {rules.map((r) => (
-                                <tr key={r.id} className="border-t">
-                                    <td className="p-2">{r.name}</td>
-                                    <td className="p-2">{r.applies_to}</td>
-                                    <td className="p-2">{r.unit}</td>
-                                    <td className="p-2">{r.annual_allowance}</td>
-                                    <td className="p-2">
-                                        <label className="inline-flex items-center gap-2 text-sm">
-                                            <input type="checkbox" checked={r.is_active} onChange={(e) => toggleRuleActive(r, e.target.checked)} />
-                                            <span>{r.is_active ? 'Active' : 'Inactive'}</span>
-                                        </label>
-                                    </td>
-                                    <td className="p-2">
-                                        <button
-                                            className="rounded px-2 py-1 text-xs ring-1"
-                                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
-                                            onClick={() => alert('Edit coming soon')}
-                                        >
-                                            Edit
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
+                            {rules.map((r) => {
+                                const isEditing = editingRuleId === r.id;
+
+                                return (
+                                    <tr key={r.id} className="border-t">
+                                        {/* Name */}
+                                        <td className="p-2">
+                                            {isEditing ? (
+                                                <input
+                                                    className="w-full rounded-md px-2 py-1 text-sm ring-1"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                    value={editRuleDraft.name}
+                                                    onChange={(e) =>
+                                                        setEditRuleDraft((prev) => ({
+                                                            ...prev,
+                                                            name: e.target.value,
+                                                        }))
+                                                    }
+                                                />
+                                            ) : (
+                                                r.name
+                                            )}
+                                        </td>
+
+                                        {/* Applies to */}
+                                        <td className="p-2">
+                                            {isEditing ? (
+                                                <select
+                                                    className="w-full rounded-md px-2 py-1 text-sm ring-1"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                    value={editRuleDraft.applies_to}
+                                                    onChange={(e) =>
+                                                        setEditRuleDraft((prev) => ({
+                                                            ...prev,
+                                                            applies_to: e.target.value as 'ALL' | 'STAFF' | 'BANK' | 'MANAGER',
+                                                        }))
+                                                    }
+                                                >
+                                                    <option value="ALL">All</option>
+                                                    <option value="STAFF">Staff</option>
+                                                    <option value="BANK">Bank</option>
+                                                    <option value="MANAGER">Manager</option>
+                                                </select>
+                                            ) : (
+                                                r.applies_to
+                                            )}
+                                        </td>
+
+                                        {/* Unit */}
+                                        <td className="p-2">
+                                            {isEditing ? (
+                                                <select
+                                                    className="w-full rounded-md px-2 py-1 text-sm ring-1"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                    value={editRuleDraft.unit}
+                                                    onChange={(e) =>
+                                                        setEditRuleDraft((prev) => ({
+                                                            ...prev,
+                                                            unit: e.target.value as 'HOURS' | 'DAYS',
+                                                        }))
+                                                    }
+                                                >
+                                                    <option value="HOURS">Hours</option>
+                                                    <option value="DAYS">Days</option>
+                                                </select>
+                                            ) : (
+                                                r.unit
+                                            )}
+                                        </td>
+
+                                        {/* Amount / year */}
+                                        <td className="p-2">
+                                            {isEditing ? (
+                                                <input
+                                                    type="number"
+                                                    min={0}
+                                                    step={0.5}
+                                                    className="w-full rounded-md px-2 py-1 text-sm ring-1"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                    value={editRuleDraft.annual_allowance}
+                                                    onChange={(e) =>
+                                                        setEditRuleDraft((prev) => ({
+                                                            ...prev,
+                                                            annual_allowance: e.target.value,
+                                                        }))
+                                                    }
+                                                />
+                                            ) : (
+                                                r.annual_allowance
+                                            )}
+                                        </td>
+
+                                        {/* Active toggle (unchanged) */}
+                                        <td className="p-2">
+                                            <label className="inline-flex items-center gap-2 text-sm">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={r.is_active}
+                                                    onChange={(e) => toggleRuleActive(r, e.target.checked)}
+                                                    disabled={editBusy && isEditing}
+                                                />
+                                                <span>{r.is_active ? 'Active' : 'Inactive'}</span>
+                                            </label>
+                                        </td>
+
+                                        {/* Actions */}
+                                        <td className="p-2">
+                                            {isEditing ? (
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        className="rounded px-2 py-1 text-xs ring-1 disabled:opacity-60"
+                                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                        disabled={editBusy}
+                                                        onClick={() => saveEditedRule(r.id)}
+                                                    >
+                                                        {editBusy ? 'Saving…' : 'Save'}
+                                                    </button>
+                                                    <button
+                                                        className="rounded px-2 py-1 text-xs ring-1 disabled:opacity-60"
+                                                        style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                        disabled={editBusy}
+                                                        onClick={cancelEditRule}
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    className="rounded px-2 py-1 text-xs ring-1"
+                                                    style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                                    onClick={() => startEditRule(r)}
+                                                >
+                                                    Edit
+                                                </button>
+                                            )}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
                             {rules.length === 0 && (
                                 <tr>
                                     <td className="p-2 text-sm text-gray-500" colSpan={6}>No rules yet.</td>
                                 </tr>
                             )}
                         </tbody>
+
                     </table>
                 </div>
             </Section>
@@ -1585,8 +1793,23 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                             onChange={(e) => setAssignHomeId(e.target.value)}
                         >
                             <option value="">{homes.length ? 'Select home…' : 'No homes'}</option>
-                            {homes.map((h) => (<option key={h.id} value={h.id}>{h.name}</option>))}
+                            {homes.map((h) => (
+                                <option key={h.id} value={h.id}>
+                                    {h.name}
+                                </option>
+                            ))}
                         </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs text-gray-600 mb-1">Search by name</label>
+                        <input
+                            className="w-full rounded-md px-2 py-2 ring-1"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            placeholder="Start typing…"
+                            value={assignSearch}
+                            onChange={(e) => setAssignSearch(e.target.value)}
+                        />
                     </div>
                 </div>
 
@@ -1603,7 +1826,7 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                             </tr>
                         </thead>
                         <tbody>
-                            {people.map((p) => {
+                            {filteredPeople.map((p) => {
                                 const currentRule = assignments.get(p.user_id) || null;
                                 const ov = overrides.get(p.user_id) || null;
                                 const draft = ovDraft.get(p.user_id) || { unit: 'HOURS' as const, remaining: '' };
@@ -1699,9 +1922,20 @@ function LeaveSettingsTab({ isAdmin }: { isAdmin: boolean }) {
                                     </tr>
                                 );
                             })}
+
                             {people.length === 0 && (
                                 <tr>
-                                    <td className="p-2 text-sm text-gray-500" colSpan={3}>No people found for this home.</td>
+                                    <td className="p-2 text-sm text-gray-500" colSpan={3}>
+                                        No people found for this home.
+                                    </td>
+                                </tr>
+                            )}
+
+                            {people.length > 0 && filteredPeople.length === 0 && (
+                                <tr>
+                                    <td className="p-2 text-sm text-gray-500" colSpan={3}>
+                                        No matches for the current search.
+                                    </td>
                                 </tr>
                             )}
                         </tbody>

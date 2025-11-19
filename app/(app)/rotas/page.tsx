@@ -1088,9 +1088,11 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
                 return next;
             });
         } else {
+            // UPDATE branch (fixed)
             const upd = await supabase
                 .from('rota_entries')
                 .update({
+                    user_id: editUserId,                 // ⭐ THIS is the missing bit
                     shift_type_id: payload.shift_type_id,
                     hours: payload.hours,
                     notes: payload.notes,

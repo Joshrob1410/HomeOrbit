@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '@/supabase/client';
 import { getEffectiveLevel, type AppLevel } from '@/supabase/roles';
 
-// Put this just above AuditEvent
+// JSON helper type
 type Json =
     | string
     | number
@@ -33,7 +33,6 @@ type AuditEvent = {
     meta: Json | null;
 };
 
-
 type CompanyRow = {
     id: string;
     name: string | null;
@@ -52,7 +51,7 @@ type Filters = {
     actorName: string;
     subjectName: string;
     fromDate: string; // yyyy-mm-dd
-    toDate: string;   // yyyy-mm-dd
+    toDate: string; // yyyy-mm-dd
 };
 
 const initialFilters: Filters = {
@@ -65,6 +64,202 @@ const initialFilters: Filters = {
     toDate: '',
 };
 
+// Helpers for rendering "what changed"
+type FieldChange = {
+    label: string;
+    oldValue: string;
+    newValue: string;
+};
+
+type JsonObject = { [key: string]: Json };
+
+function isJsonObject(value: Json | null): value is JsonObject {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+// Nice labels for known fields (courses etc. + rota bits)
+const FIELD_LABELS: Record<string, string> = {
+    name: 'Name',
+    training_type: 'Type',
+    mandatory: 'Mandatory',
+    refresher_years: 'Refresher (years)',
+    due_soon_days: 'Due soon (days)',
+    link: 'Link',
+
+    // Rota / people bits
+    user_id: 'Person',
+    subject_user_id: 'Person',
+    shift_type_id: 'Shift type',
+    hours: 'Hours',
+    status: 'Status',
+};
+
+function formatAuditValue(
+    value: Json | undefined,
+    fieldKey: string,
+    userLookup: Record<string, string>,
+    shiftTypeLookup: Record<string, string>,
+): string {
+    if (value === null || value === undefined) return '—';
+
+    // Foreign keys → nice labels
+    if (fieldKey === 'user_id' || fieldKey === 'subject_user_id') {
+        if (typeof value === 'string') {
+            const name = userLookup[value];
+            if (name) return name;
+            // Fallback: abbreviated UUID so it’s less ugly
+            return value.length > 8 ? `${value.slice(0, 8)}…` : value;
+        }
+    }
+
+    if (fieldKey === 'shift_type_id') {
+        if (typeof value === 'string') {
+            const label = shiftTypeLookup[value];
+            if (label) return label;
+            return value.length > 8 ? `${value.slice(0, 8)}…` : value;
+        }
+    }
+
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    return String(value);
+}
+
+// Look for meta keys like "name_old" / "name_new" and turn them into changes
+function extractFieldChangesFromMeta(
+    meta: Json | null,
+    userLookup: Record<string, string>,
+    shiftTypeLookup: Record<string, string>,
+): FieldChange[] {
+    if (!isJsonObject(meta)) return [];
+
+    const changes: FieldChange[] = [];
+    const obj = meta as JsonObject;
+
+    for (const key of Object.keys(obj)) {
+        if (!key.endsWith('_old')) continue;
+
+        const base = key.slice(0, -4); // strip "_old"
+        const newKey = `${base}_new`;
+        if (!(newKey in obj)) continue;
+
+        const oldVal = obj[key];
+        const newVal = obj[newKey];
+
+        // Skip if nothing actually changed
+        if (JSON.stringify(oldVal) === JSON.stringify(newVal)) continue;
+
+        const label =
+            FIELD_LABELS[base] ??
+            base
+                .split('_')
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+
+        changes.push({
+            label,
+            oldValue: formatAuditValue(oldVal, base, userLookup, shiftTypeLookup),
+            newValue: formatAuditValue(newVal, base, userLookup, shiftTypeLookup),
+        });
+    }
+
+    return changes;
+}
+
+// Full field-change extractor: try meta, then fall back to diff.old/new
+function extractFieldChanges(
+    event: AuditEvent,
+    userLookup: Record<string, string>,
+    shiftTypeLookup: Record<string, string>,
+): FieldChange[] {
+    // 1) Prefer explicit *_old / *_new in meta if present
+    const fromMeta = extractFieldChangesFromMeta(event.meta, userLookup, shiftTypeLookup);
+    if (fromMeta.length > 0) return fromMeta;
+
+    // 2) Fallback: compare diff.old vs diff.new if diff has that shape
+    if (!isJsonObject(event.diff)) return [];
+
+    const diffObj = event.diff as JsonObject;
+    const oldRaw = diffObj['old'];
+    const newRaw = diffObj['new'];
+
+    if (!isJsonObject(oldRaw) || !isJsonObject(newRaw)) return [];
+
+    const oldObj = oldRaw as JsonObject;
+    const newObj = newRaw as JsonObject;
+
+    const keys = new Set([...Object.keys(oldObj), ...Object.keys(newObj)]);
+    const changes: FieldChange[] = [];
+
+    for (const key of keys) {
+        // Skip boring / noisy fields
+        if (['id', 'created_at', 'updated_at', 'company_id', 'home_id'].includes(key)) {
+            continue;
+        }
+
+        const oldVal = oldObj[key];
+        const newVal = newObj[key];
+
+        // No real change
+        if (JSON.stringify(oldVal) === JSON.stringify(newVal)) continue;
+
+        const label =
+            FIELD_LABELS[key] ??
+            key
+                .split('_')
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+
+        changes.push({
+            label,
+            oldValue: formatAuditValue(oldVal, key, userLookup, shiftTypeLookup),
+            newValue: formatAuditValue(newVal, key, userLookup, shiftTypeLookup),
+        });
+    }
+
+    return changes;
+}
+
+function renderDetailsCell(
+    event: AuditEvent,
+    userLookup: Record<string, string>,
+    shiftTypeLookup: Record<string, string>,
+): React.ReactNode {
+    const changes = extractFieldChanges(event, userLookup, shiftTypeLookup);
+
+    if (changes.length === 0) {
+        // No field-level diff captured for this event
+        return <span className="text-xs text-neutral-500">—</span>;
+    }
+
+    if (changes.length === 1) {
+        const c = changes[0];
+        return (
+            <div className="text-xs text-neutral-100">
+                <span className="font-medium">{c.label}: </span>
+                <span className="line-through text-neutral-500 mr-1">{c.oldValue}</span>
+                <span>→ {c.newValue}</span>
+            </div>
+        );
+    }
+
+    return (
+        <details className="group text-xs text-neutral-100">
+            <summary className="cursor-pointer text-neutral-300">
+                {changes.length} field{changes.length > 1 ? 's' : ''} changed
+            </summary>
+            <ul className="mt-1 list-disc pl-4 space-y-0.5 text-neutral-100">
+                {changes.map((c) => (
+                    <li key={c.label}>
+                        <span className="font-medium">{c.label}: </span>
+                        <span className="line-through text-neutral-500 mr-1">{c.oldValue}</span>
+                        <span>→ {c.newValue}</span>
+                    </li>
+                ))}
+            </ul>
+        </details>
+    );
+}
+
 export default function AuditPage() {
     const router = useRouter();
 
@@ -76,6 +271,10 @@ export default function AuditPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    // Lookups: user_id → name, shift_type_id → "CODE — Label"
+    const [userLookup, setUserLookup] = useState<Record<string, string>>({});
+    const [shiftTypeLookup, setShiftTypeLookup] = useState<Record<string, string>>({});
+
     useEffect(() => {
         let cancelled = false;
 
@@ -85,18 +284,15 @@ export default function AuditPage() {
                 setError(null);
 
                 const lvl = await getEffectiveLevel();
-                setLevel(lvl);
-
-
                 if (cancelled) return;
+
+                setLevel(lvl);
 
                 // Staff have no access at all
                 if (lvl === '4_STAFF') {
                     router.replace('/dashboard');
                     return;
                 }
-
-                setLevel(lvl);
 
                 // 1) Load audit events (RLS should already scope by user)
                 const { data: eventsData, error: eventsError } = await supabase
@@ -108,6 +304,7 @@ export default function AuditPage() {
                 if (cancelled) return;
 
                 if (eventsError) {
+                    // eslint-disable-next-line no-console
                     console.error(eventsError);
                     setError('Failed to load audit events.');
                 } else {
@@ -118,6 +315,7 @@ export default function AuditPage() {
                 await loadFilterScope(lvl, cancelled);
             } catch (err) {
                 if (!cancelled) {
+                    // eslint-disable-next-line no-console
                     console.error(err);
                     setError('Something went wrong while loading audit data.');
                 }
@@ -126,8 +324,8 @@ export default function AuditPage() {
             }
         }
 
-        async function loadFilterScope(lvl: AppLevel, cancelled: boolean) {
-            if (cancelled) return;
+        async function loadFilterScope(lvl: AppLevel, cancelledInner: boolean) {
+            if (cancelledInner) return;
 
             // Admin: can see everything
             if (lvl === '1_ADMIN') {
@@ -136,7 +334,7 @@ export default function AuditPage() {
                     supabase.from('homes').select('id, name, company_id').order('name'),
                 ]);
 
-                if (cancelled) return;
+                if (cancelledInner) return;
 
                 setCompanies((companiesData ?? []) as CompanyRow[]);
                 setHomes((homesData ?? []) as HomeRow[]);
@@ -150,7 +348,7 @@ export default function AuditPage() {
                     .select('company_id, has_company_access')
                     .eq('has_company_access', true);
 
-                if (cancelled) return;
+                if (cancelledInner) return;
 
                 const companyIds = (membershipData ?? []).map((m) => m.company_id);
                 if (companyIds.length === 0) {
@@ -172,7 +370,7 @@ export default function AuditPage() {
                         .order('name'),
                 ]);
 
-                if (cancelled) return;
+                if (cancelledInner) return;
 
                 setCompanies((companiesData ?? []) as CompanyRow[]);
                 setHomes((homesData ?? []) as HomeRow[]);
@@ -192,7 +390,7 @@ export default function AuditPage() {
                     .from('home_memberships')
                     .select('home_id, role');
 
-                if (cancelled) return;
+                if (cancelledInner) return;
 
                 const managerHomeIds = Array.from(
                     new Set(
@@ -214,7 +412,7 @@ export default function AuditPage() {
                     .in('id', managerHomeIds)
                     .order('name');
 
-                if (cancelled) return;
+                if (cancelledInner) return;
 
                 const homesRows = (homesData ?? []) as HomeRow[];
                 setHomes(homesRows);
@@ -230,7 +428,7 @@ export default function AuditPage() {
                         .in('id', companyIds)
                         .order('name');
 
-                    if (cancelled) return;
+                    if (cancelledInner) return;
 
                     setCompanies((companiesData ?? []) as CompanyRow[]);
 
@@ -244,8 +442,6 @@ export default function AuditPage() {
                 if (managerHomeIds.length === 1) {
                     setFilters((prev) => ({ ...prev, homeId: managerHomeIds[0] }));
                 }
-
-                return;
             }
         }
 
@@ -255,6 +451,145 @@ export default function AuditPage() {
             cancelled = true;
         };
     }, [router]);
+
+    // Build lookups for user_id / shift_type_id from events
+    useEffect(() => {
+        let cancelled = false;
+
+        async function hydrateLookups() {
+            if (!events.length) {
+                setUserLookup({});
+                setShiftTypeLookup({});
+                return;
+            }
+
+            const userIds = new Set<string>();
+            const shiftTypeIds = new Set<string>();
+            const uuidish =
+                /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+            for (const e of events) {
+                const metaObj = isJsonObject(e.meta) ? (e.meta as JsonObject) : null;
+                const diffObj = isJsonObject(e.diff) ? (e.diff as JsonObject) : null;
+
+                // From meta (e.g. user_id_old/user_id_new, shift_type_id_old/_new)
+                if (metaObj) {
+                    for (const [key, val] of Object.entries(metaObj)) {
+                        if (typeof val !== 'string') continue;
+
+                        if (key.includes('user_id') && uuidish.test(val)) {
+                            userIds.add(val);
+                        }
+                        if (key.includes('shift_type_id') && uuidish.test(val)) {
+                            shiftTypeIds.add(val);
+                        }
+                    }
+                }
+
+                // From diff.old / diff.new
+                if (diffObj) {
+                    const collect = (obj: Json | undefined) => {
+                        if (!isJsonObject(obj ?? null)) return;
+                        const jsonObj = obj as JsonObject;
+                        for (const [key, val] of Object.entries(jsonObj)) {
+                            if (typeof val !== 'string') continue;
+
+                            if (key === 'user_id' && uuidish.test(val)) {
+                                userIds.add(val);
+                            }
+                            if (key === 'shift_type_id' && uuidish.test(val)) {
+                                shiftTypeIds.add(val);
+                            }
+                        }
+                    };
+
+                    collect(diffObj.old);
+                    collect(diffObj.new);
+                }
+
+                // Also include subject_user_id at top level
+                if (e.subject_user_id && uuidish.test(e.subject_user_id)) {
+                    userIds.add(e.subject_user_id);
+                }
+            }
+
+            const userIdList = Array.from(userIds);
+            const shiftTypeIdList = Array.from(shiftTypeIds);
+
+            const [profilesRes, shiftTypesRes] = await Promise.all([
+                userIdList.length
+                    ? supabase
+                        .from('profiles')
+                        .select('user_id, full_name')
+                        .in('user_id', userIdList)
+                    : Promise.resolve<{
+                        data: { user_id: string; full_name: string | null }[];
+                        error: null;
+                    }>({
+                        data: [],
+                        error: null,
+                    }),
+                shiftTypeIdList.length
+                    ? supabase
+                        .from('shift_types')
+                        .select('id, code, label')
+                        .in('id', shiftTypeIdList)
+                    : Promise.resolve<{
+                        data: { id: string; code: string | null; label: string | null }[];
+                        error: null;
+                    }>({
+                        data: [],
+                        error: null,
+                    }),
+            ]);
+
+
+            if (cancelled) return;
+
+            if (profilesRes.error) {
+                // eslint-disable-next-line no-console
+                console.error(profilesRes.error);
+            }
+            if (shiftTypesRes.error) {
+                // eslint-disable-next-line no-console
+                console.error(shiftTypesRes.error);
+            }
+
+            const newUserLookup: Record<string, string> = {};
+            for (const row of profilesRes.data ?? []) {
+                const rowUserId = row.user_id as string | null;
+                const rowName = (row.full_name as string | null) ?? '';
+                if (rowUserId) {
+                    newUserLookup[rowUserId] = rowName || rowUserId;
+                }
+            }
+
+            const newShiftTypeLookup: Record<string, string> = {};
+            for (const row of shiftTypesRes.data ?? []) {
+                const id = row.id as string | null;
+                const code = row.code as string | null;
+                const label = row.label as string | null;
+                if (!id) continue;
+
+                if (code && label) {
+                    newShiftTypeLookup[id] = `${code} — ${label}`;
+                } else if (code || label) {
+                    newShiftTypeLookup[id] = (code ?? label) as string;
+                } else {
+                    newShiftTypeLookup[id] = id;
+                }
+            }
+
+            setUserLookup(newUserLookup);
+            setShiftTypeLookup(newShiftTypeLookup);
+        }
+
+        void hydrateLookups();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [events]);
 
     // Apply client-side filters on the events we have
     const filteredEvents = useMemo(() => {
@@ -273,7 +608,7 @@ export default function AuditPage() {
         const subjectTerm = subjectName.trim().toLowerCase();
 
         const fromTime = fromDate ? new Date(fromDate).getTime() : null;
-        const toTime = toDate ? new Date(toDate + 'T23:59:59').getTime() : null;
+        const toTime = toDate ? new Date(`${toDate}T23:59:59`).getTime() : null;
 
         return events.filter((e) => {
             // Company / home restriction
@@ -323,7 +658,32 @@ export default function AuditPage() {
     }, [events, filters]);
 
     const canShowCompanyFilter = level === '1_ADMIN' || level === '2_COMPANY';
-    const canShowHomeFilter = level === '1_ADMIN' || level === '2_COMPANY' || level === '3_MANAGER';
+    const canShowHomeFilter =
+        level === '1_ADMIN' || level === '2_COMPANY' || level === '3_MANAGER';
+
+    const LEVEL_LABELS: Record<AppLevel, string> = {
+        '1_ADMIN': 'Admin',
+        '2_COMPANY': 'Company',
+        '3_MANAGER': 'Manager',
+        '4_STAFF': 'Staff',
+    };
+
+    function formatEntityTypeLabel(raw: string | null): string {
+        if (!raw) return '—';
+
+        const lower = raw.toLowerCase();
+
+        // Optional explicit overrides
+        if (lower === 'course') return 'Course';
+        if (lower === 'training_record') return 'Training record';
+
+        // Generic: snake/upper-case -> nice words
+        return raw
+            .toLowerCase()
+            .split(/[_ ]+/)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+    }
 
     if (loading && !level) {
         return <div className="text-sm text-neutral-400">Loading audit events…</div>;
@@ -527,6 +887,9 @@ export default function AuditPage() {
                             <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">
                                 Summary
                             </th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">
+                                Details
+                            </th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-800/80">
@@ -535,6 +898,10 @@ export default function AuditPage() {
                                 companies.find((c) => c.id === e.company_id)?.name ?? null;
                             const homeName =
                                 homes.find((h) => h.id === e.home_id)?.name ?? null;
+
+                            // Subject: prefer stored subject_name, but we could later fall back
+                            // to userLookup[e.subject_user_id] if you want.
+                            const subjectDisplay = e.subject_name ?? '—';
 
                             return (
                                 <tr key={e.id} className="hover:bg-neutral-900/60">
@@ -558,14 +925,15 @@ export default function AuditPage() {
                                         </div>
                                         {e.actor_level && (
                                             <div className="mt-1 inline-flex rounded-full bg-neutral-800/80 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-neutral-300">
-                                                {e.actor_level}
+                                                {LEVEL_LABELS[e.actor_level as AppLevel] ??
+                                                    e.actor_level}
                                             </div>
                                         )}
                                     </td>
 
                                     {/* Subject */}
                                     <td className="px-3 py-2 align-top text-sm text-neutral-100">
-                                        {e.subject_name ?? '—'}
+                                        {subjectDisplay}
                                     </td>
 
                                     {/* Scope (company / home) */}
@@ -588,10 +956,12 @@ export default function AuditPage() {
                                         <div className="mb-1 inline-flex rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-200">
                                             {e.category}
                                         </div>
-                                        <div className="text-sm text-neutral-100">{e.action}</div>
+                                        <div className="text-sm text-neutral-100">
+                                            {e.action}
+                                        </div>
                                         <div className="text-[11px] text-neutral-500">
-                                            {e.entity_type}
-                                            {e.entity_id ? ` • ${e.entity_id}` : ''}
+                                            {formatEntityTypeLabel(e.entity_type)}
+                                            {/* entity_id deliberately hidden – internal ID, not user-friendly */}
                                         </div>
                                     </td>
 
@@ -599,13 +969,21 @@ export default function AuditPage() {
                                     <td className="px-3 py-2 align-top text-sm text-neutral-100">
                                         {e.summary ?? '—'}
                                     </td>
+
+                                    {/* Details (field-level changes from meta/diff) */}
+                                    <td className="px-3 py-2 align-top text-xs text-neutral-100">
+                                        {renderDetailsCell(e, userLookup, shiftTypeLookup)}
+                                    </td>
                                 </tr>
                             );
                         })}
 
                         {filteredEvents.length === 0 && (
                             <tr>
-                                <td className="px-3 py-6 text-center text-sm text-neutral-500" colSpan={6}>
+                                <td
+                                    className="px-3 py-6 text-center text-sm text-neutral-500"
+                                    colSpan={7}
+                                >
                                     No audit events match your filters.
                                 </td>
                             </tr>
