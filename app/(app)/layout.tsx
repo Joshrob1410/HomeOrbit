@@ -123,16 +123,18 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                     WebkitBackdropFilter: 'saturate(180%) blur(8px)',
                 }}
             >
-                <div className="absolute left-2 top-2 lg:left-3 lg:top-2 z-40">
+                {/* Desktop: keep Orbit toggle floating in the top-left like before */}
+                <div className="hidden lg:block absolute left-2 top-2 lg:left-3 lg:top-2 z-40">
                     <ThemeToggle initialOrbit={orbitEnabled} />
                 </div>
 
                 <div className="mx-auto max-w-6xl px-4 h-14 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                    {/* Left side: menu + logo + title */}
+                    <div className="flex items-center gap-2 min-w-0">
                         <MobileSidebar orbitInitial={orbitEnabled} />
                         <Link
                             href="/dashboard"
-                            className="inline-flex items-center gap-2"
+                            className="inline-flex items-center gap-2 min-w-0"
                         >
                             <div
                                 className="h-8 w-8 rounded-xl overflow-hidden shadow-sm ring-2 ring-white/70"
@@ -148,7 +150,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                                 />
                             </div>
                             <span
-                                className="font-semibold"
+                                className="font-semibold truncate"
                                 style={{ color: 'var(--ink)' }}
                             >
                                 HomeOrbit
@@ -156,7 +158,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                         </Link>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    {/* Right side: theme toggle (mobile), bell, user chip */}
+                    <div className="flex items-center gap-2 sm:gap-3">
+                        {/* Mobile/tablet: inline theme toggle so it doesn't sit on top of things */}
+                        <div className="lg:hidden">
+                            <ThemeToggle initialOrbit={orbitEnabled} />
+                        </div>
+
                         <NotificationBell />
                         <UserChip />
                     </div>

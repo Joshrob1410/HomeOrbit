@@ -302,8 +302,8 @@ export default function UserChip() {
                 type="button"
                 className="
     relative z-0 rounded-full bg-red-300/80
-    px-3 sm:px-4 py-1.5
-    text-xs sm:text-sm font-medium text-black
+    px-2.5 sm:px-3 py-1 sm:py-1.5
+    text-[11px] sm:text-xs font-medium text-black
     shadow-sm hover:bg-rose-400 transition
     whitespace-nowrap shrink-0
   "
