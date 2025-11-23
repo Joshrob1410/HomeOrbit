@@ -47,6 +47,21 @@ type Profile = { user_id: string; full_name: string | null };
 
 type KpiRow = { week_start: string; week_end: string; hours: number };
 
+type ShiftPattern = {
+    id: string;
+    home_id: string;
+    user_id: string;
+    days_on: number;
+    days_off: number;
+    start_date: string;               // 'YYYY-MM-DD'
+    default_shift_type_id: string | null;
+    day_shift_type_ids?: string[] | null; // per-ON-day shift types
+    day_start_times?: string[] | null;    // NEW: per-ON-day start times ('HH:MM')
+};
+
+
+
+
 /* ========= Helpers ========= */
 
 // Local-time first-of-month ISO (avoids UTC shift issues)
@@ -797,7 +812,36 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
     const [kpiMonthTotal, setKpiMonthTotal] = useState<number>(0);
     const isAllHomes = (homeId === 'ALL');
 
+    // Reload flag so we can force the rota loader effect to re-run
+    const [rotaReloadToken, setRotaReloadToken] = useState(0);
+
+    // Profiles for names & initials
     const [profiles, setProfiles] = useState<Profile[]>([]);
+
+    // Shift patterns modal state
+    const [showPatterns, setShowPatterns] = useState(false);
+    const [patterns, setPatterns] = useState<ShiftPattern[]>([]);
+    const [patternsLoading, setPatternsLoading] = useState(false);
+    const [patternError, setPatternError] = useState<string | null>(null);
+
+    const [editingPatternUserId, setEditingPatternUserId] = useState<string | null>(null);
+    const [patternDaysOn, setPatternDaysOn] = useState<number>(1);
+    const [patternDaysOff, setPatternDaysOff] = useState<number>(2);
+    const [patternStartDate, setPatternStartDate] = useState<string>(() => ymdLocal(new Date()));
+    const [patternDayShiftIds, setPatternDayShiftIds] = useState<string[]>([]);
+    const [patternDayStartTimes, setPatternDayStartTimes] = useState<string[]>([]); // NEW
+
+    // Is there any ON day with a shift type but no start time?
+    const hasPatternTimeError =
+        editingPatternUserId !== null &&
+        patternDaysOn > 0 &&
+        Array.from({ length: patternDaysOn }).some((_, idx) => {
+            const sid = patternDayShiftIds[idx];
+            const t = patternDayStartTimes[idx];
+            return !!sid && !t; // shift picked but no time
+        });
+
+
     const codeById = useMemo(() => {
         const m = new Map<string, string>();
         shiftTypes.forEach(s => m.set(s.id, s.code));
@@ -931,7 +975,7 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
             })));
             setKpiWeekly(k.weekly); setKpiMonthTotal(k.monthTotal);
         })();
-    }, [homeId, month, shiftTypes, isAllHomes, myHomes, companyId, isAdmin, isCompany]);
+    }, [homeId, month, shiftTypes, isAllHomes, myHomes, companyId, isAdmin, isCompany, rotaReloadToken]);
 
     // People ids for the selected home (optionally bank)
     // MERGE profiles instead of replacing so bank names never drop to "numbers"
@@ -993,6 +1037,219 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
             });
         })();
     }, [entries, includeBank]);
+
+    // ================================
+    // Shift pattern helpers
+    // ================================
+    function currentHome(): Home | undefined {
+        return myHomes.find(h => h.id === homeId);
+    }
+
+    async function loadPatternsForHome(selectedHomeId: string) {
+        setPatternsLoading(true);
+        setPatternError(null);
+
+        const { data, error } = await supabase
+            .from('rota_shift_patterns')
+            .select('*')
+            .eq('home_id', selectedHomeId)
+            .order('start_date', { ascending: false });
+
+        if (error) {
+            setPatternError(error.message);
+            setPatterns([]);
+        } else {
+            setPatterns((data ?? []) as ShiftPattern[]);
+        }
+        setPatternsLoading(false);
+    }
+
+    function openPatternsModal() {
+        if (!homeId || homeId === 'ALL') {
+            alert('Select a specific home first.');
+            return;
+        }
+        setShowPatterns(true);
+        setPatternStartDate(ymdLocal(new Date())); // always today when opening
+        setEditingPatternUserId(null);
+        setPatternDayShiftIds([]);
+        setPatternDayStartTimes([]); // NEW
+        void loadPatternsForHome(homeId);
+    }
+
+
+    function closePatternsModal() {
+        setShowPatterns(false);
+        setPatterns([]);
+        setEditingPatternUserId(null);
+        setPatternError(null);
+    }
+
+    function openPatternEditorForUser(uid: string) {
+        setEditingPatternUserId(uid);
+        const existing = patterns.find(p => p.user_id === uid);
+        if (existing) {
+            setPatternDaysOn(existing.days_on);
+            setPatternDaysOff(existing.days_off);
+            setPatternStartDate(existing.start_date || ymdLocal(new Date()));
+
+            const perDay = Array.from({ length: existing.days_on }, (_, idx) =>
+                existing.day_shift_type_ids?.[idx] || ''
+            );
+            setPatternDayShiftIds(perDay);
+
+            const perDayStart = Array.from({ length: existing.days_on }, (_, idx) => {
+                const raw = existing.day_start_times?.[idx] || '';
+                return raw ? raw.slice(0, 5) : ''; // 'HH:MM'
+            });
+            setPatternDayStartTimes(perDayStart); // NEW
+        } else {
+            const defaultOn = 1;
+            const defaultOff = 2;
+            setPatternDaysOn(defaultOn);
+            setPatternDaysOff(defaultOff);
+            setPatternStartDate(ymdLocal(new Date()));
+            setPatternDayShiftIds(Array.from({ length: defaultOn }, () => ''));
+            setPatternDayStartTimes(Array.from({ length: defaultOn }, () => '')); // NEW
+        }
+    }
+
+
+
+    async function savePatternForCurrentUser() {
+        if (!homeId || homeId === 'ALL') {
+            setPatternError('Select a specific home first.');
+            return;
+        }
+        if (!editingPatternUserId) {
+            setPatternError('Pick a person to edit.');
+            return;
+        }
+        if (!patternStartDate) {
+            setPatternError('Choose a start date.');
+            return;
+        }
+        if (patternDaysOn < 1) {
+            setPatternError('Days on must be at least 1.');
+            return;
+        }
+
+        // NEW: require a start time for every ON day that has a shift type
+        for (let i = 0; i < patternDaysOn; i++) {
+            const sid = patternDayShiftIds[i];
+            const t = patternDayStartTimes[i];
+            if (sid && !t) {
+                setPatternError('Please set a start time for every ON day that has a shift type.');
+                return;
+            }
+        }
+
+        setPatternError(null);
+        setPatternsLoading(true);
+
+        const existing = patterns.find(p => p.user_id === editingPatternUserId);
+
+        const payload = {
+            home_id: homeId,
+            user_id: editingPatternUserId,
+            days_on: patternDaysOn,
+            days_off: patternDaysOff,
+            start_date: patternStartDate,
+            default_shift_type_id: null,
+            day_shift_type_ids: patternDayShiftIds,
+            day_start_times: patternDayStartTimes,
+        };
+
+        if (!existing) {
+            const { data, error } = await supabase
+                .from('rota_shift_patterns')
+                .insert(payload)
+                .select('*')
+                .single();
+
+            setPatternsLoading(false);
+
+            if (error) {
+                setPatternError(error.message);
+                return;
+            }
+
+            setPatterns(prev => [...prev, data as ShiftPattern]);
+        } else {
+            const { data, error } = await supabase
+                .from('rota_shift_patterns')
+                .update(payload)
+                .eq('id', existing.id)
+                .select('*')
+                .single();
+
+            setPatternsLoading(false);
+
+            if (error) {
+                setPatternError(error.message);
+                return;
+            }
+
+            setPatterns(prev =>
+                prev.map(p => (p.id === existing.id ? (data as ShiftPattern) : p))
+            );
+        }
+    }
+
+
+    async function deletePatternForUser(uid: string) {
+        const existing = patterns.find(p => p.user_id === uid);
+        if (!existing) return;
+
+        setPatternError(null);
+        setPatternsLoading(true);
+
+        const { error } = await supabase
+            .from('rota_shift_patterns')
+            .delete()
+            .eq('id', existing.id);
+
+        setPatternsLoading(false);
+
+        if (error) {
+            setPatternError(error.message);
+            return;
+        }
+
+        setPatterns(prev => prev.filter(p => p.id !== existing.id));
+        if (editingPatternUserId === uid) {
+            setEditingPatternUserId(null);
+        }
+    }
+
+    async function applyPatternsToCurrentMonth() {
+        if (!homeId || homeId === 'ALL') {
+            setPatternError('Select a specific home first.');
+            return;
+        }
+
+        setPatternError(null);
+        setPatternsLoading(true);
+
+        const { error } = await supabase.rpc('rota_apply_shift_patterns_for_month', {
+            p_home_id: homeId,
+            p_month: month,
+        });
+
+        setPatternsLoading(false);
+
+        if (error) {
+            setPatternError(error.message);
+            return;
+        }
+
+        // Close modal and refresh rota entries
+        setShowPatterns(false);
+        setPatterns([]);
+        setEditingPatternUserId(null);
+        setRotaReloadToken(t => t + 1);
+    }
+
 
     async function ensureRota(): Promise<Rota | undefined> {
         if (!homeId || !month) return;
@@ -1125,26 +1382,58 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
     const calendarHidden = !homeId || !month || (isAdmin && !companyId);
 
     const rightExtra = (
-        <div className="flex items-center gap-2 justify-end" style={{ color: 'var(--ink)' }}>
-            <label className="text-xs inline-flex items-center gap-2" style={{ color: 'var(--sub)' }}>
-                <input type="checkbox" checked={includeBank} onChange={e => setIncludeBank(e.target.checked)} />
-                Include bank staff
-            </label>
-            <button disabled={!rota || rota.status === 'LIVE'} onClick={makeLive}
-                className="rounded-lg px-3 py-2 text-sm ring-1 transition disabled:opacity-60"
-                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+        <div
+            className="flex flex-wrap items-center justify-end gap-2 sm:gap-3"
+            style={{ color: 'var(--ink)' }}
+        >
+            <button
+                disabled={!rota || rota.status === 'LIVE'}
+                onClick={makeLive}
+                className="rounded-lg px-3 py-2 text-xs sm:text-sm ring-1 transition disabled:opacity-60 whitespace-nowrap"
+                style={{
+                    background: 'var(--nav-item-bg)',
+                    borderColor: 'var(--ring)',
+                    color: 'var(--ink)',
+                }}
             >
-                Make Live
+                Set live
             </button>
-            <button disabled={!rota || rota.status === 'DRAFT'} onClick={setDraft}
-                className="rounded-lg px-3 py-2 text-sm ring-1 transition disabled:opacity-60"
-                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+
+            <button
+                disabled={!rota || rota.status === 'DRAFT'}
+                onClick={setDraft}
+                className="rounded-lg px-3 py-2 text-xs sm:text-sm ring-1 transition disabled:opacity-60 whitespace-nowrap"
+                style={{
+                    background: 'var(--nav-item-bg)',
+                    borderColor: 'var(--ring)',
+                    color: 'var(--ink)',
+                }}
             >
-                Set Draft
+                Set draft
             </button>
+
+            <button
+                type="button"
+                onClick={openPatternsModal}
+                disabled={!homeId || isAllHomes}
+                className="rounded-lg px-3 py-2 text-xs sm:text-sm ring-1 transition disabled:opacity-60 whitespace-nowrap"
+                style={{
+                    background: 'var(--nav-item-bg)',
+                    borderColor: 'var(--ring)',
+                    color: 'var(--ink)',
+                }}
+                title={
+                    !homeId || isAllHomes
+                        ? 'Select a specific home to manage shift patterns'
+                        : 'Set repeating shift patterns for this home'
+                }
+            >
+                Set shift patterns
+            </button>
+
             {rota && (
                 <span
-                    className={`text-xs px-2 py-1 rounded ring-1 ${rota.status === 'LIVE'
+                    className={`text-[11px] sm:text-xs px-2 py-1 rounded ring-1 whitespace-nowrap ${rota.status === 'LIVE'
                             ? 'bg-emerald-50 text-emerald-700 ring-emerald-100 [data-orbit="1"]:bg-emerald-500/10 [data-orbit="1"]:text-emerald-200 [data-orbit="1"]:ring-emerald-400/25'
                             : 'bg-amber-50 text-amber-700 ring-amber-100 [data-orbit="1"]:bg-amber-500/10 [data-orbit="1"]:text-amber-200 [data-orbit="1"]:ring-amber-400/25'
                         }`}
@@ -1409,35 +1698,482 @@ function ManageRotas({ isAdmin, isCompany, isManager }: {
                                         />
                                     </div>
                                 </div>
-                                <div className="mt-4 flex justify-between items-center">
-                                    <label className="text-xs inline-flex items-center gap-2" style={{ color: 'var(--sub)' }}>
-                                        <input
-                                            type="checkbox"
-                                            checked={includeBank}
-                                            onChange={e => setIncludeBank(e.target.checked)}
-                                        />
-                                        Include bank staff
-                                    </label>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => setEditingDay(null)}
-                                            className="rounded px-3 py-2 text-sm ring-1 transition"
-                                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            onClick={saveEditor}
-                                            className="rounded px-3 py-2 text-sm ring-1 transition"
-                                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
-                                        >
-                                            Save
-                                        </button>
-                                    </div>
+                                <div className="mt-4 flex justify-end gap-2">
+                                    <button
+                                        onClick={() => setEditingDay(null)}
+                                        className="rounded px-3 py-2 text-sm ring-1 transition"
+                                        style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={saveEditor}
+                                        className="rounded px-3 py-2 text-sm ring-1 transition"
+                                        style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                    >
+                                        Save
+                                    </button>
                                 </div>
                             </div>
                         </div>
                     )}
+
+                    {showPatterns && (
+                        <div
+                            className="fixed inset-0 bg-black/40 z-50 grid place-items-center px-4"
+                            onClick={closePatternsModal}
+                        >
+                            <div
+                                className="w-full max-w-4xl rounded-2xl p-5 ring-1 shadow-2xl grid gap-4 md:grid-cols-[2fr,3fr]"
+                                style={{ background: 'var(--panel-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                                onClick={e => e.stopPropagation()}
+                            >
+                                <div className="space-y-3">
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div>
+                                            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>
+                                                Shift patterns — {currentHome()?.name || 'Select a home'}
+                                            </h3>
+                                            <p className="mt-1 text-xs" style={{ color: 'var(--sub)' }}>
+                                                Set repeating patterns like <strong>1 day on / 2 days off</strong> or{' '}
+                                                <strong>2 on / 4 off</strong>. Applying a pattern fills empty days on the rota
+                                                from the chosen start date. It never overwrites existing entries or leave.
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={closePatternsModal}
+                                            className="text-xs px-2 py-1 rounded ring-1"
+                                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--sub)' }}
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+
+                                    <div
+                                        className="rounded-xl ring-1 overflow-hidden"
+                                        style={{ borderColor: 'var(--ring)', background: 'var(--card-grad)' }}
+                                    >
+                                        <div
+                                            className="px-3 py-2 text-xs font-medium border-b"
+                                            style={{ borderColor: 'var(--ring)', color: 'var(--sub)', background: 'var(--nav-item-bg)' }}
+                                        >
+                                            Staff in {currentHome()?.name || 'home'}
+                                        </div>
+                                        <div className="max-h-64 overflow-auto">
+                                            <table className="min-w-full text-xs" style={{ color: 'var(--ink)' }}>
+                                                <thead>
+                                                    <tr style={{ background: 'var(--nav-item-bg)' }}>
+                                                        <th className="text-left px-3 py-2">Name</th>
+                                                        <th className="text-left px-3 py-2">Pattern</th>
+                                                        <th className="text-left px-3 py-2">Start date</th>
+                                                        <th className="text-left px-3 py-2">Default shift</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {homePeopleIds.length === 0 && (
+                                                        <tr>
+                                                            <td
+                                                                colSpan={5}
+                                                                className="px-3 py-3"
+                                                                style={{ color: 'var(--sub)' }}
+                                                            >
+                                                                No staff found for this home.
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                    {homePeopleIds.map(uid => {
+                                                        const pattern = patterns.find(p => p.user_id === uid);
+                                                        const shiftLabel = (() => {
+                                                            if (pattern?.day_shift_type_ids && pattern.day_shift_type_ids.length) {
+                                                                const codes = pattern.day_shift_type_ids.map(id =>
+                                                                    shiftTypes.find(st => st.id === id)?.code || '—'
+                                                                );
+                                                                return codes.join(' / ');
+                                                            }
+                                                            if (pattern?.default_shift_type_id) {
+                                                                return shiftTypes.find(st => st.id === pattern.default_shift_type_id)?.code ?? null;
+                                                            }
+                                                            return null;
+                                                        })();
+
+                                                        const isSelected = editingPatternUserId === uid;
+
+                                                        return (
+                                                            <tr
+                                                                key={uid}
+                                                                onClick={() => openPatternEditorForUser(uid)}
+                                                                className={`cursor-pointer transition-colors ${isSelected
+                                                                        ? 'bg-indigo-50 [data-orbit="1"]:bg-indigo-700/40'
+                                                                        : 'hover:bg-slate-50 [data-orbit="1"]:hover:bg-slate-700/40'
+                                                                    }`}
+                                                                style={{
+                                                                    borderTop: '1px solid var(--ring)',
+                                                                    color: 'var(--ink)', // keep text strong even when highlighted
+                                                                }}
+                                                            >
+                                                                <td className="px-3 py-2" style={{ color: 'var(--ink)' }}>
+                                                                    {displayName(profiles, uid)}
+                                                                </td>
+                                                                <td className="px-3 py-2" style={{ color: 'var(--ink)' }}>
+                                                                    {pattern ? (
+                                                                        `${pattern.days_on} on / ${pattern.days_off} off`
+                                                                    ) : (
+                                                                        <span style={{ color: 'var(--sub)' }}>No pattern set</span>
+                                                                    )}
+                                                                </td>
+                                                                <td className="px-3 py-2" style={{ color: 'var(--ink)' }}>
+                                                                    {pattern ? pattern.start_date : '—'}
+                                                                </td>
+                                                                <td className="px-3 py-2" style={{ color: 'var(--ink)' }}>
+                                                                    {shiftLabel ? (
+                                                                        <span className="font-mono">{shiftLabel}</span>
+                                                                    ) : (
+                                                                        <span style={{ color: 'var(--sub)' }}>None</span>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {patternError && (
+                                        <p className="text-xs" style={{ color: '#DC2626' }}>
+                                            {patternError}
+                                        </p>
+                                    )}
+                                    {patternsLoading && (
+                                        <p className="text-xs" style={{ color: 'var(--sub)' }}>
+                                            Working…
+                                        </p>
+                                    )}
+                                </div>
+
+                                {/* Editor + apply section */}
+                                <div className="space-y-4">
+                                    <section
+                                        className="rounded-xl p-4 ring-1"
+                                        style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+                                    >
+                                        <h4 className="text-sm font-semibold mb-2" style={{ color: 'var(--ink)' }}>
+                                            {editingPatternUserId
+                                                ? `Edit pattern — ${displayName(profiles, editingPatternUserId)}`
+                                                : 'Select a staff member to edit their pattern'}
+                                        </h4>
+
+                                        {editingPatternUserId ? (
+                                            <div className="space-y-3">
+                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                                    <div>
+                                                        <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                                                            Quick presets
+                                                        </label>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const nextOn = 1;
+                                                                    const nextOff = 2;
+                                                                    setPatternDaysOn(nextOn);
+                                                                    setPatternDaysOff(nextOff);
+
+                                                                    setPatternDayShiftIds(prev => {
+                                                                        const next = [...prev];
+                                                                        next.length = nextOn;
+                                                                        for (let i = 0; i < nextOn; i++) {
+                                                                            if (next[i] === undefined) next[i] = '';
+                                                                        }
+                                                                        return next;
+                                                                    });
+
+                                                                    setPatternDayStartTimes(prev => {
+                                                                        const next = [...prev];
+                                                                        next.length = nextOn;
+                                                                        for (let i = 0; i < nextOn; i++) {
+                                                                            if (next[i] === undefined) next[i] = '';
+                                                                        }
+                                                                        return next;
+                                                                    });
+                                                                }}
+                                                                className="px-2 py-1 text-[11px] rounded ring-1"
+                                                                style={{
+                                                                    background: 'var(--nav-item-bg)',
+                                                                    borderColor: 'var(--ring)',
+                                                                    color: 'var(--ink)',
+                                                                }}
+                                                            >
+                                                                1 on / 2 off
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const nextOn = 2;
+                                                                    const nextOff = 4;
+                                                                    setPatternDaysOn(nextOn);
+                                                                    setPatternDaysOff(nextOff);
+
+                                                                    setPatternDayShiftIds(prev => {
+                                                                        const next = [...prev];
+                                                                        next.length = nextOn;
+                                                                        for (let i = 0; i < nextOn; i++) {
+                                                                            if (next[i] === undefined) next[i] = '';
+                                                                        }
+                                                                        return next;
+                                                                    });
+
+                                                                    setPatternDayStartTimes(prev => {
+                                                                        const next = [...prev];
+                                                                        next.length = nextOn;
+                                                                        for (let i = 0; i < nextOn; i++) {
+                                                                            if (next[i] === undefined) next[i] = '';
+                                                                        }
+                                                                        return next;
+                                                                    });
+                                                                }}
+                                                                className="px-2 py-1 text-[11px] rounded ring-1"
+                                                                style={{
+                                                                    background: 'var(--nav-item-bg)',
+                                                                    borderColor: 'var(--ring)',
+                                                                    color: 'var(--ink)',
+                                                                }}
+                                                            >
+                                                                2 on / 4 off
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                                                            Days on
+                                                        </label>
+                                                        <input
+                                                            type="number"
+                                                            min={1}
+                                                            max={31}
+                                                            className="w-full rounded px-3 py-2 text-sm ring-1"
+                                                            style={{
+                                                                background: 'var(--nav-item-bg)',
+                                                                borderColor: 'var(--ring)',
+                                                                color: 'var(--ink)',
+                                                            }}
+                                                            value={patternDaysOn}
+                                                            onChange={e => {
+                                                                const nextOn = Number(e.target.value) || 0;
+                                                                setPatternDaysOn(nextOn);
+
+                                                                setPatternDayShiftIds(prev => {
+                                                                    const next = [...prev];
+                                                                    next.length = nextOn;
+                                                                    for (let i = 0; i < nextOn; i++) {
+                                                                        if (next[i] === undefined) next[i] = '';
+                                                                    }
+                                                                    return next;
+                                                                });
+
+                                                                setPatternDayStartTimes(prev => {       // NEW
+                                                                    const next = [...prev];
+                                                                    next.length = nextOn;
+                                                                    for (let i = 0; i < nextOn; i++) {
+                                                                        if (next[i] === undefined) next[i] = '';
+                                                                    }
+                                                                    return next;
+                                                                });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                                                            Days off
+                                                        </label>
+                                                        <input
+                                                            type="number"
+                                                            min={0}
+                                                            max={31}
+                                                            className="w-full rounded px-3 py-2 text-sm ring-1"
+                                                            style={{
+                                                                background: 'var(--nav-item-bg)',
+                                                                borderColor: 'var(--ring)',
+                                                                color: 'var(--ink)',
+                                                            }}
+                                                            value={patternDaysOff}
+                                                            onChange={e => setPatternDaysOff(Number(e.target.value) || 0)}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                <div>
+                                                    <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                                                        Start date
+                                                    </label>
+                                                    <input
+                                                        type="date"
+                                                        className="w-full rounded px-3 py-2 text-sm ring-1"
+                                                        style={{
+                                                            background: 'var(--nav-item-bg)',
+                                                            borderColor: 'var(--ring)',
+                                                            color: 'var(--ink)',
+                                                        }}
+                                                        value={patternStartDate}
+                                                        onChange={e => setPatternStartDate(e.target.value)}
+                                                    />
+                                                    <p className="mt-1 text-[11px]" style={{ color: 'var(--sub)' }}>
+                                                        Start date defaults to today, but you can change it if needed.
+                                                    </p>
+                                                </div>
+                                                {patternDaysOn > 0 && (
+                                                    <div className="space-y-2 mt-3">
+                                                        <label className="block text-xs mb-1" style={{ color: 'var(--sub)' }}>
+                                                            Shift type and start time for each ON day
+                                                        </label>
+                                                        <div className="space-y-1">
+                                                            {Array.from({ length: patternDaysOn }, (_, idx) => {
+                                                                const shiftId = patternDayShiftIds[idx] ?? '';
+                                                                const timeVal = patternDayStartTimes[idx] ?? '';
+                                                                const missingTime = !!shiftId && !timeVal; // shift chosen but no time
+
+                                                                return (
+                                                                    <div key={idx} className="flex items-center gap-2">
+                                                                        <span
+                                                                            className="w-20 text-[11px]"
+                                                                            style={{ color: 'var(--sub)' }}
+                                                                        >
+                                                                            Day {idx + 1}
+                                                                        </span>
+
+                                                                        {/* Shift type selector */}
+                                                                        <select
+                                                                            className="flex-1 rounded px-3 py-2 text-sm ring-1"
+                                                                            style={{
+                                                                                background: 'var(--nav-item-bg)',
+                                                                                borderColor: 'var(--ring)',
+                                                                                color: 'var(--ink)',
+                                                                            }}
+                                                                            value={shiftId}
+                                                                            onChange={e => {
+                                                                                const value = e.target.value;
+                                                                                setPatternDayShiftIds(prev => {
+                                                                                    const next = [...prev];
+                                                                                    next[idx] = value;
+                                                                                    return next;
+                                                                                });
+                                                                            }}
+                                                                        >
+                                                                            <option value="">(none)</option>
+                                                                            {shiftTypes.map(st => (
+                                                                                <option key={st.id} value={st.id}>
+                                                                                    {st.code} — {st.label}
+                                                                                </option>
+                                                                            ))}
+                                                                        </select>
+
+                                                                        {/* Start time for this ON day */}
+                                                                        <div className="flex flex-col items-start">
+                                                                            <input
+                                                                                type="time"
+                                                                                className="w-24 rounded px-2 py-1 text-sm ring-1"
+                                                                                style={{
+                                                                                    background: 'var(--nav-item-bg)',
+                                                                                    borderColor: missingTime ? '#DC2626' : 'var(--ring)',
+                                                                                    color: 'var(--ink)',
+                                                                                }}
+                                                                                value={timeVal}
+                                                                                onChange={e => {
+                                                                                    const value = e.target.value;
+                                                                                    setPatternDayStartTimes(prev => {
+                                                                                        const next = [...prev];
+                                                                                        next[idx] = value;
+                                                                                        return next;
+                                                                                    });
+                                                                                }}
+                                                                            />
+                                                                            {missingTime && (
+                                                                                <span
+                                                                                    className="mt-0.5 text-[10px]"
+                                                                                    style={{ color: '#DC2626' }}
+                                                                                >
+                                                                                    Required with a shift
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <p className="mt-1 text-[11px]" style={{ color: 'var(--sub)' }}>
+                                                            Leave a day as “(none)” if you don&apos;t want a shift type for that ON day.
+                                                            If you pick a shift type for a day, you must also set a start time.
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                <div className="flex items-center justify-between gap-2">
+                                                    {patterns.some(p => p.user_id === editingPatternUserId) && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => editingPatternUserId && void deletePatternForUser(editingPatternUserId)}
+                                                            disabled={patternsLoading}
+                                                            className="rounded px-3 py-2 text-xs ring-1 disabled:opacity-60"
+                                                            style={{
+                                                                background: 'var(--nav-item-bg)',
+                                                                borderColor: 'var(--ring)',
+                                                                color: 'var(--sub)',
+                                                            }}
+                                                        >
+                                                            Delete pattern
+                                                        </button>
+                                                    )}
+                                                    <div className="flex justify-end gap-2 flex-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => savePatternForCurrentUser()}
+                                                            disabled={patternsLoading || hasPatternTimeError}
+                                                            className="ml-auto rounded px-3 py-2 text-sm ring-1 disabled:opacity-60"
+                                                            style={{
+                                                                background: 'var(--nav-item-bg)',
+                                                                borderColor: 'var(--ring)',
+                                                                color: 'var(--ink)',
+                                                            }}
+                                                        >
+                                                            Save pattern
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs" style={{ color: 'var(--sub)' }}>
+                                                Pick a staff member in the table on the left to create or edit their pattern.
+                                            </p>
+                                        )}
+                                    </section>
+
+                                    <section
+                                        className="rounded-xl p-4 ring-1"
+                                        style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+                                    >
+                                        <h4 className="text-sm font-semibold mb-2" style={{ color: 'var(--ink)' }}>
+                                            Apply patterns to this month
+                                        </h4>
+                                        <p className="text-xs mb-3" style={{ color: 'var(--sub)' }}>
+                                            This fills <strong>empty</strong> days on the rota for{' '}
+                                            {currentHome()?.name || 'this home'} in{' '}
+                                            {new Date(month).toLocaleString(undefined, { month: 'long', year: 'numeric' })}.
+                                            Existing shifts and leave are left untouched.
+                                        </p>
+                                        <button
+                                            type="button"
+                                            onClick={applyPatternsToCurrentMonth}
+                                            disabled={patternsLoading || !homeId || isAllHomes}
+                                            className="rounded-md px-3 py-2 text-sm text-white disabled:opacity-60"
+                                            style={{ background: BRAND_GRADIENT }}
+                                        >
+                                            Apply patterns to this month
+                                        </button>
+                                    </section>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                 </>
             )}
 

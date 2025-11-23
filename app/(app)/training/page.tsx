@@ -3518,7 +3518,7 @@ function SetTraining({ isAdmin, isCompany, isManager }: { isAdmin: boolean; isCo
                         </label>
 
                         {/* Include managers toggle */}
-                        <div className="mb-2 flex items-center justify-between">
+                        <div className="mb-2 flex items-center gap-2">
                             <span className="text-sm" style={{ color: 'var(--sub)' }}>
                                 Include managers
                             </span>
@@ -3531,17 +3531,18 @@ function SetTraining({ isAdmin, isCompany, isManager }: { isAdmin: boolean; isCo
                                 disabled={disableControls}
                                 className="relative inline-flex h-7 w-12 items-center rounded-full ring-1 transition"
                                 style={{
-                                    background: includeManagers ? 'var(--nav-item-bg-hover)' : 'var(--nav-item-bg)',
-                                    borderColor: includeManagers ? 'var(--brand-link)' : 'var(--ring)',
+                                    background: includeManagers ? '#16A34A' : 'var(--nav-item-bg)',
+                                    borderColor: includeManagers ? '#16A34A' : 'var(--ring)',
                                     color: 'var(--ink)',
                                     opacity: disableControls ? 0.6 : 1,
+                                    boxShadow: includeManagers ? '0 0 0 1px rgba(22, 163, 74, 0.4)' : 'none',
                                 }}
                                 title="Include managers (position: Manager)"
                             >
                                 <span
                                     className="absolute left-1 top-1 h-5 w-5 rounded-full shadow transition-transform"
                                     style={{
-                                        background: 'var(--panel-bg)',
+                                        background: includeManagers ? '#ECFDF5' : 'var(--panel-bg)',
                                         transform: includeManagers ? 'translateX(24px)' : 'translateX(0)',
                                     }}
                                 />
