@@ -123,35 +123,79 @@ function Tabbed({
     isCompany: boolean;
     isManager: boolean;
 }) {
-    type Tab = 'PEOPLE' | 'HOMES' | 'COMPANIES' | 'FEATURES';
+    type Tab = 'PEOPLE' | 'HOMES' | 'YOUNG_PEOPLE' | 'CARS' | 'COMPANIES' | 'FEATURES';
     const [tab, setTab] = useState<Tab>('PEOPLE');
 
     const showHomes = isAdmin || isCompany;
+    const showYoungPeople = isAdmin || isCompany;
+    const showCars = isAdmin || isCompany;
     const showCompanies = isAdmin;
     const showFeatures = isAdmin; // feature toggles are admin-only
 
     return (
         <div className="space-y-4">
-            <div className="inline-flex rounded-lg overflow-hidden" style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', boxShadow: 'none' }}>
-                <TabBtn active={tab === 'PEOPLE'} onClick={() => setTab('PEOPLE')}>People</TabBtn>
+            <div
+                className="inline-flex rounded-lg overflow-hidden"
+                style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', boxShadow: 'none' }}
+            >
+                <TabBtn active={tab === 'PEOPLE'} onClick={() => setTab('PEOPLE')}>
+                    Staff
+                </TabBtn>
+
                 {showHomes && (
-                    <TabBtn active={tab === 'HOMES'} onClick={() => setTab('HOMES')}>Homes</TabBtn>
+                    <TabBtn active={tab === 'HOMES'} onClick={() => setTab('HOMES')}>
+                        Homes
+                    </TabBtn>
                 )}
+
+                {showYoungPeople && (
+                    <TabBtn active={tab === 'YOUNG_PEOPLE'} onClick={() => setTab('YOUNG_PEOPLE')}>
+                        Young people
+                    </TabBtn>
+                )}
+
+                {showCars && (
+                    <TabBtn active={tab === 'CARS'} onClick={() => setTab('CARS')}>
+                        Cars
+                    </TabBtn>
+                )}
+
                 {showCompanies && (
-                    <TabBtn active={tab === 'COMPANIES'} onClick={() => setTab('COMPANIES')}>Companies</TabBtn>
+                    <TabBtn active={tab === 'COMPANIES'} onClick={() => setTab('COMPANIES')}>
+                        Companies
+                    </TabBtn>
                 )}
+
                 {showFeatures && (
-                    <TabBtn active={tab === 'FEATURES'} onClick={() => setTab('FEATURES')}>Features</TabBtn>
+                    <TabBtn active={tab === 'FEATURES'} onClick={() => setTab('FEATURES')}>
+                        Features
+                    </TabBtn>
                 )}
             </div>
 
-            {tab === 'PEOPLE' && (<PeopleTab isAdmin={isAdmin} isCompany={isCompany} isManager={isManager} />)}
-            {tab === 'HOMES' && showHomes && <HomesTab isAdmin={isAdmin} isCompany={isCompany} />}
+            {tab === 'PEOPLE' && (
+                <PeopleTab isAdmin={isAdmin} isCompany={isCompany} isManager={isManager} />
+            )}
+
+            {tab === 'HOMES' && showHomes && (
+                <HomesTab isAdmin={isAdmin} isCompany={isCompany} />
+            )}
+
+            {tab === 'YOUNG_PEOPLE' && showYoungPeople && (
+                <YoungPeopleTab isAdmin={isAdmin} isCompany={isCompany} />
+            )}
+
+            {tab === 'CARS' && showCars && (
+                <CarsTab isAdmin={isAdmin} isCompany={isCompany} />
+            )}
+
             {tab === 'COMPANIES' && showCompanies && <CompaniesTab />}
+
             {tab === 'FEATURES' && showFeatures && <FeaturesTab />}
         </div>
     );
 }
+
 
 
 function TabBtn(
@@ -2050,6 +2094,568 @@ function FeaturesTab() {
                 </div>
             )}
         </section>
+    );
+}
+
+/* =====================
+   YOUNG PEOPLE TAB
+   ===================== */
+
+type YoungPerson = {
+    id: string;
+    company_id: string;
+    home_id: string;
+    full_name: string;
+    date_of_birth: string | null;
+    legal_status: string;
+};
+
+function YoungPeopleTab({ isAdmin, isCompany }: { isAdmin: boolean; isCompany: boolean }) {
+    const [companies, setCompanies] = useState<Company[]>([]);
+    const [companyId, setCompanyId] = useState<string>('');
+    const [companyName, setCompanyName] = useState<string>('');
+    const [homes, setHomes] = useState<Home[]>([]);
+    const [youngPeople, setYoungPeople] = useState<YoungPerson[]>([]);
+
+    const [name, setName] = useState('');
+    const [dob, setDob] = useState('');
+    const [legalStatus, setLegalStatus] = useState('');
+    const [homeId, setHomeId] = useState('');
+
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+
+    // Resolve company context (admin can choose; company-level is fixed)
+    useEffect(() => {
+        (async () => {
+            const { data: u } = await supabase.auth.getUser();
+            const me = u.user?.id;
+            if (!me) return;
+
+            if (isAdmin) {
+                const { data: co } = await supabase
+                    .from('companies')
+                    .select('id,name')
+                    .order('name');
+                const list = (co as Company[]) ?? [];
+                setCompanies(list);
+                if (!companyId && list[0]?.id) {
+                    setCompanyId(list[0].id);
+                }
+            } else if (isCompany) {
+                const { data: cm } = await supabase
+                    .from('company_memberships')
+                    .select('company_id')
+                    .eq('user_id', me)
+                    .maybeSingle();
+
+                const cid = (cm as { company_id?: string } | null)?.company_id || '';
+                setCompanyId(cid);
+
+                if (cid) {
+                    const { data: co } = await supabase
+                        .from('companies')
+                        .select('name')
+                        .eq('id', cid)
+                        .maybeSingle();
+                    setCompanyName((co as { name?: string } | null)?.name || '');
+                } else {
+                    setCompanyName('');
+                }
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAdmin, isCompany]);
+
+    // Load homes + young people whenever company changes
+    useEffect(() => {
+        (async () => {
+            if (!companyId) {
+                setHomes([]);
+                setYoungPeople([]);
+                return;
+            }
+            setLoading(true);
+            try {
+                const [homesRes, ypRes] = await Promise.all([
+                    supabase
+                        .from('homes')
+                        .select('id,name,company_id')
+                        .eq('company_id', companyId)
+                        .order('name'),
+                    supabase
+                        .from('young_people')
+                        .select('id,company_id,home_id,full_name,date_of_birth,legal_status')
+                        .eq('company_id', companyId)
+                        .order('full_name'),
+                ]);
+
+                setHomes((homesRes.data as Home[]) ?? []);
+                setYoungPeople((ypRes.data as YoungPerson[]) ?? []);
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, [companyId]);
+
+    async function reloadYoungPeople() {
+        if (!companyId) return;
+        const { data } = await supabase
+            .from('young_people')
+            .select('id,company_id,home_id,full_name,date_of_birth,legal_status')
+            .eq('company_id', companyId)
+            .order('full_name');
+        setYoungPeople((data as YoungPerson[]) ?? []);
+    }
+
+    async function addYoungPerson(e: React.FormEvent) {
+        e.preventDefault();
+        if (!companyId || !name.trim() || !dob || !legalStatus.trim() || !homeId) return;
+
+        setSaving(true);
+        try {
+            const { error } = await supabase
+                .from('young_people')
+                .insert({
+                    company_id: companyId,
+                    home_id: homeId,
+                    full_name: name.trim(),
+                    date_of_birth: dob,
+                    legal_status: legalStatus.trim(),
+                });
+
+            if (error) throw error;
+
+            setName('');
+            setDob('');
+            setLegalStatus('');
+            setHomeId('');
+
+            await reloadYoungPeople();
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to add young person';
+            // eslint-disable-next-line no-alert
+            alert(msg);
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    const formatDob = (d: string | null) => {
+        if (!d) return '';
+        try {
+            return new Date(d).toLocaleDateString('en-GB');
+        } catch {
+            return d;
+        }
+    };
+
+    return (
+        <div className="space-y-4">
+            {/* Create young person */}
+            <section
+                className="rounded-lg p-4 ring-1"
+                style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+            >
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    Add young person
+                </h2>
+                <form onSubmit={addYoungPerson} className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Company
+                        </label>
+                        {isAdmin ? (
+                            <select
+                                className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                value={companyId}
+                                onChange={(e) => setCompanyId(e.target.value)}
+                            >
+                                {companies.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.name}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input
+                                className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                value={companyName || '(Your company)'}
+                                readOnly
+                            />
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Full name
+                        </label>
+                        <input
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            placeholder="Young person name"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Date of birth
+                        </label>
+                        <input
+                            type="date"
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={dob}
+                            onChange={(e) => setDob(e.target.value)}
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Legal status
+                        </label>
+                        <input
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={legalStatus}
+                            onChange={(e) => setLegalStatus(e.target.value)}
+                            placeholder="e.g. Section 20, Full care order"
+                        />
+                    </div>
+
+                    <div className="md:col-span-2">
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Home
+                        </label>
+                        <select
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={homeId}
+                            onChange={(e) => setHomeId(e.target.value)}
+                            disabled={!homes.length}
+                        >
+                            <option value="">{homes.length ? '(Select home)' : '(No homes)'}</option>
+                            {homes.map((h) => (
+                                <option key={h.id} value={h.id}>
+                                    {h.name}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div className="self-end">
+                        <button
+                            className="rounded-md px-3 py-2 text-sm ring-1 transition"
+                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                            disabled={saving || !companyId || !name.trim() || !dob || !legalStatus.trim() || !homeId}
+                        >
+                            {saving ? 'Saving…' : 'Add young person'}
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            {/* List */}
+            <section
+                className="rounded-lg p-4 ring-1"
+                style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+            >
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    Young people
+                </h2>
+
+                {loading ? (
+                    <div className="mt-3 text-sm" style={{ color: 'var(--sub)' }}>
+                        Loading…
+                    </div>
+                ) : (
+                    <ul className="mt-3 divide-y" style={{ borderColor: 'var(--ring)' }}>
+                        {youngPeople.map((yp) => {
+                            const home = homes.find((h) => h.id === yp.home_id);
+                            const dobLabel = formatDob(yp.date_of_birth);
+                            return (
+                                <li key={yp.id} className="py-3">
+                                    <div className="font-medium" style={{ color: 'var(--ink)' }}>
+                                        {yp.full_name}
+                                    </div>
+                                    <div className="text-xs mt-0.5" style={{ color: 'var(--sub)' }}>
+                                        {dobLabel && <>DOB: {dobLabel} · </>}
+                                        Home: {home?.name || '—'} · Legal status: {yp.legal_status || '—'}
+                                    </div>
+                                </li>
+                            );
+                        })}
+                        {!youngPeople.length && (
+                            <li className="py-3 text-sm" style={{ color: 'var(--sub)' }}>
+                                No young people added yet.
+                            </li>
+                        )}
+                    </ul>
+                )}
+            </section>
+        </div>
+    );
+}
+
+/* =====================
+   CARS TAB
+   ===================== */
+
+type Car = {
+    id: string;
+    company_id: string;
+    make: string;
+    model: string;
+    registration: string;
+};
+
+function CarsTab({ isAdmin, isCompany }: { isAdmin: boolean; isCompany: boolean }) {
+    const [companies, setCompanies] = useState<Company[]>([]);
+    const [companyId, setCompanyId] = useState<string>('');
+    const [companyName, setCompanyName] = useState<string>('');
+
+    const [cars, setCars] = useState<Car[]>([]);
+
+    const [make, setMake] = useState('');
+    const [model, setModel] = useState('');
+    const [registration, setRegistration] = useState('');
+
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+
+    // Resolve company context (admin can choose; company-level is fixed)
+    useEffect(() => {
+        (async () => {
+            const { data: u } = await supabase.auth.getUser();
+            const me = u.user?.id;
+            if (!me) return;
+
+            if (isAdmin) {
+                const { data: co } = await supabase
+                    .from('companies')
+                    .select('id,name')
+                    .order('name');
+                const list = (co as Company[]) ?? [];
+                setCompanies(list);
+                if (!companyId && list[0]?.id) {
+                    setCompanyId(list[0].id);
+                }
+            } else if (isCompany) {
+                const { data: cm } = await supabase
+                    .from('company_memberships')
+                    .select('company_id')
+                    .eq('user_id', me)
+                    .maybeSingle();
+
+                const cid = (cm as { company_id?: string } | null)?.company_id || '';
+                setCompanyId(cid);
+
+                if (cid) {
+                    const { data: co } = await supabase
+                        .from('companies')
+                        .select('name')
+                        .eq('id', cid)
+                        .maybeSingle();
+                    setCompanyName((co as { name?: string } | null)?.name || '');
+                } else {
+                    setCompanyName('');
+                }
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isAdmin, isCompany]);
+
+    // Load cars whenever company changes
+    useEffect(() => {
+        (async () => {
+            if (!companyId) {
+                setCars([]);
+                return;
+            }
+            setLoading(true);
+            try {
+                const { data } = await supabase
+                    .from('cars')
+                    .select('id,company_id,make,model,registration')
+                    .eq('company_id', companyId)
+                    .order('registration');
+                setCars((data as Car[]) ?? []);
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, [companyId]);
+
+    async function reloadCars() {
+        if (!companyId) return;
+        const { data } = await supabase
+            .from('cars')
+            .select('id,company_id,make,model,registration')
+            .eq('company_id', companyId)
+            .order('registration');
+        setCars((data as Car[]) ?? []);
+    }
+
+    async function addCar(e: React.FormEvent) {
+        e.preventDefault();
+        if (!companyId || !make.trim() || !model.trim() || !registration.trim()) return;
+
+        setSaving(true);
+        try {
+            const reg = registration.trim().toUpperCase();
+
+            const { error } = await supabase
+                .from('cars')
+                .insert({
+                    company_id: companyId,
+                    make: make.trim(),
+                    model: model.trim(),
+                    registration: reg,
+                });
+
+            if (error) throw error;
+
+            setMake('');
+            setModel('');
+            setRegistration('');
+
+            await reloadCars();
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to add car';
+            // eslint-disable-next-line no-alert
+            alert(msg);
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    return (
+        <div className="space-y-4">
+            {/* Create car */}
+            <section
+                className="rounded-lg p-4 ring-1"
+                style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+            >
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    Add car
+                </h2>
+                <form onSubmit={addCar} className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Company
+                        </label>
+                        {isAdmin ? (
+                            <select
+                                className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                value={companyId}
+                                onChange={(e) => setCompanyId(e.target.value)}
+                            >
+                                {companies.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.name}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input
+                                className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                                style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                                value={companyName || '(Your company)'}
+                                readOnly
+                            />
+                        )}
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Make
+                        </label>
+                        <input
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={make}
+                            onChange={(e) => setMake(e.target.value)}
+                            placeholder="e.g. Ford"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Model
+                        </label>
+                        <input
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={model}
+                            onChange={(e) => setModel(e.target.value)}
+                            placeholder="e.g. Fiesta"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm" style={{ color: 'var(--ink)' }}>
+                            Registration
+                        </label>
+                        <input
+                            className="mt-1 w-full rounded-md px-2 py-2 ring-1 text-sm"
+                            style={{ background: 'var(--nav-item-bg)', color: 'var(--ink)', borderColor: 'var(--ring)' }}
+                            value={registration}
+                            onChange={(e) => setRegistration(e.target.value)}
+                            placeholder="e.g. AB12 CDE"
+                        />
+                    </div>
+
+                    <div className="self-end">
+                        <button
+                            className="rounded-md px-3 py-2 text-sm ring-1 transition"
+                            style={{ background: 'var(--nav-item-bg)', borderColor: 'var(--ring)', color: 'var(--ink)' }}
+                            disabled={saving || !companyId || !make.trim() || !model.trim() || !registration.trim()}
+                        >
+                            {saving ? 'Saving…' : 'Add car'}
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            {/* List */}
+            <section
+                className="rounded-lg p-4 ring-1"
+                style={{ background: 'var(--card-grad)', borderColor: 'var(--ring)' }}
+            >
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    Cars
+                </h2>
+
+                {loading ? (
+                    <div className="mt-3 text-sm" style={{ color: 'var(--sub)' }}>
+                        Loading…
+                    </div>
+                ) : (
+                    <ul className="mt-3 divide-y" style={{ borderColor: 'var(--ring)' }}>
+                        {cars.map((car) => (
+                            <li key={car.id} className="py-3">
+                                <div className="font-medium" style={{ color: 'var(--ink)' }}>
+                                    {car.registration}
+                                </div>
+                                <div className="text-xs mt-0.5" style={{ color: 'var(--sub)' }}>
+                                    {car.make} {car.model}
+                                </div>
+                            </li>
+                        ))}
+                        {!cars.length && (
+                            <li className="py-3 text-sm" style={{ color: 'var(--sub)' }}>
+                                No cars added yet.
+                            </li>
+                        )}
+                    </ul>
+                )}
+            </section>
+        </div>
     );
 }
 

@@ -5,12 +5,12 @@ C:.
 ³   .eslintignore
 ³   .gitignore
 ³   eslint.config.mjs
+³   filetree.txt
 ³   next-env.d.ts
 ³   next.config.ts
 ³   package-lock.json
 ³   package.json
 ³   postcss.config.mjs
-³   projectfiletree.txt
 ³   README.md
 ³   tsconfig.json
 ³   tsconfig.tsbuildinfo
@@ -18,6 +18,7 @@ C:.
 ÃÄÄÄ.next
 ³   ³   app-build-manifest.json
 ³   ³   build-manifest.json
+³   ³   fallback-build-manifest.json
 ³   ³   package.json
 ³   ³   prerender-manifest.json
 ³   ³   react-loadable-manifest.json
@@ -34,10 +35,16 @@ C:.
 ³   ³   ³   ³       60.1760100421504.SQDVL_rKs33H_KStJjwYW3rkP17_gb6vPu92ltYeTGg.Vy8iMmVhNTUtMTk5YjUzNzg5ODgi.webp
 ³   ³   ³   ³       
 ³   ³   ³   ÃÄÄÄ8pOT4jozPzGheGn09ID2T5l8H8ptaqSNFaOXxtFRQ8A
-³   ³   ³   ³       60.1760363366514.n96iczkN1SE9iQ7z9ZSWcSbpBoVb3Y0qg0yGR2iMHNI.Vy8iMmVhNTUtMTk5YjUzNzg5ODgi.webp
+³   ³   ³   ³       60.1763985481964.aYtkHXbOhZmhPAQlGsFDcS-WtI0kuWVt4RdcUo-Z8dY.Vy8iZTJkZGUtMTk5ZGU4MTE1ODQi.webp
 ³   ³   ³   ³       
-³   ³   ³   ÀÄÄÄg2ozZQmvTd4AxwIWFk7nlVsjjNsZW59Zvn-6A8Be6W0
-³   ³   ³           60.1760363366511.nPV1BAPbzd4ZgtVB0eIzkxd-3qxHg9MpGnJOCFGvEcQ.Vy8iMmVhNTUtMTk5YjUzNzg5ODgi.webp
+³   ³   ³   ÃÄÄÄg2ozZQmvTd4AxwIWFk7nlVsjjNsZW59Zvn-6A8Be6W0
+³   ³   ³   ³       60.1760381825661.JLhAyoMpP8rut6j2zqEj9x2NZ1YQsF_yqwICDdrBMro.Vy8iZTJkZGUtMTk5ZGU4MTE1ODQi.webp
+³   ³   ³   ³       
+³   ³   ³   ÃÄÄÄHYTUX2VYa0XUJX4EOTTw51MkoVu3Vl7WssAYtgogblE
+³   ³   ³   ³       60.1763985481956.L9pbjh3NfcKvEgbB1bjfHhxshAbypxYqufPII7p0djE.Vy8iZTJkZGUtMTk5ZGU4MTE1ODQi.webp
+³   ³   ³   ³       
+³   ³   ³   ÀÄÄÄrIYo_3f-_DsG2Gq0dDlBK9xIuMDNcEcExeXNNJ7YqkE
+³   ³   ³           60.1763932790251.6eRHKMbcb5uPzvOl5BI9Ml9soSvJgmzfo6cTGs2Tq-s.Vy8iZTJkZGUtMTk5ZGU4MTE1ODQi.webp
 ³   ³   ³           
 ³   ³   ÃÄÄÄswc
 ³   ³   ³   ÀÄÄÄplugins
@@ -77,7 +84,12 @@ C:.
 ³   ³       ³       36.pack.gz
 ³   ³       ³       37.pack.gz
 ³   ³       ³       38.pack.gz
+³   ³       ³       39.pack.gz
 ³   ³       ³       4.pack.gz
+³   ³       ³       40.pack.gz
+³   ³       ³       41.pack.gz
+³   ³       ³       42.pack.gz
+³   ³       ³       43.pack.gz
 ³   ³       ³       5.pack.gz
 ³   ³       ³       6.pack.gz
 ³   ³       ³       7.pack.gz
@@ -88,7 +100,9 @@ C:.
 ³   ³       ³       
 ³   ³       ÃÄÄÄclient-development-fallback
 ³   ³       ³       0.pack.gz
+³   ³       ³       1.pack.gz
 ³   ³       ³       index.pack.gz
+³   ³       ³       index.pack.gz.old
 ³   ³       ³       
 ³   ³       ÀÄÄÄserver-development
 ³   ³               0.pack.gz
@@ -142,7 +156,13 @@ C:.
 ³   ³               52.pack.gz
 ³   ³               53.pack.gz
 ³   ³               54.pack.gz
+³   ³               55.pack.gz
+³   ³               56.pack.gz
+³   ³               57.pack.gz
+³   ³               58.pack.gz
+³   ³               59.pack.gz
 ³   ³               6.pack.gz
+³   ³               60.pack.gz
 ³   ³               7.pack.gz
 ³   ³               8.pack.gz
 ³   ³               9.pack.gz
@@ -161,88 +181,72 @@ C:.
 ³   ³   ³   server-reference-manifest.js
 ³   ³   ³   server-reference-manifest.json
 ³   ³   ³   webpack-runtime.js
+³   ³   ³   _error.js
 ³   ³   ³   
 ³   ³   ÃÄÄÄapp
 ³   ³   ³   ÃÄÄÄ(app)
-³   ³   ³   ³   ÃÄÄÄdashboard
-³   ³   ³   ³   ³       page.js
-³   ³   ³   ³   ³       page_client-reference-manifest.js
-³   ³   ³   ³   ³       
-³   ³   ³   ³   ÀÄÄÄlicenses
-³   ³   ³   ³           page.js
-³   ³   ³   ³           page_client-reference-manifest.js
-³   ³   ³   ³           
-³   ³   ³   ÃÄÄÄapi
-³   ³   ³   ³   ÃÄÄÄadmin
-³   ³   ³   ³   ³   ÀÄÄÄlicenses
-³   ³   ³   ³   ³       ÃÄÄÄlist
-³   ³   ³   ³   ³       ³       route.js
-³   ³   ³   ³   ³       ³       route_client-reference-manifest.js
-³   ³   ³   ³   ³       ³       
-³   ³   ³   ³   ³       ÀÄÄÄupdate
-³   ³   ³   ³   ³               route.js
-³   ³   ³   ³   ³               route_client-reference-manifest.js
-³   ³   ³   ³   ³               
-³   ³   ³   ³   ÀÄÄÄlicense
-³   ³   ³   ³       ÀÄÄÄstatus
-³   ³   ³   ³               route.js
-³   ³   ³   ³               route_client-reference-manifest.js
-³   ³   ³   ³               
-³   ³   ³   ÃÄÄÄauth
-³   ³   ³   ³   ÀÄÄÄlogin
+³   ³   ³   ³   ÀÄÄÄform-builder
 ³   ³   ³   ³           page.js
 ³   ³   ³   ³           page_client-reference-manifest.js
 ³   ³   ³   ³           
 ³   ³   ³   ÀÄÄÄicon.png
 ³   ³   ³           route.js
 ³   ³   ³           
+³   ³   ÃÄÄÄpages
+³   ³   ³       _app.js
+³   ³   ³       _document.js
+³   ³   ³       _error.js
+³   ³   ³       
 ³   ³   ÀÄÄÄvendor-chunks
 ³   ³           @supabase.js
 ³   ³           @swc.js
 ³   ³           cookie.js
 ³   ³           next.js
+³   ³           styled-jsx.js
 ³   ³           tr46.js
 ³   ³           webidl-conversions.js
 ³   ³           whatwg-url.js
-³   ³           zod.js
 ³   ³           
 ³   ÃÄÄÄstatic
 ³   ³   ÃÄÄÄchunks
 ³   ³   ³   ³   app-pages-internals.js
 ³   ³   ³   ³   main-app.js
+³   ³   ³   ³   main.js
 ³   ³   ³   ³   polyfills.js
+³   ³   ³   ³   react-refresh.js
 ³   ³   ³   ³   webpack.js
 ³   ³   ³   ³   _app-pages-browser_node_modules_next_dist_client_dev_noop-turbopack-hmr_js.js
+³   ³   ³   ³   _error.js
+³   ³   ³   ³   _pages-dir-browser_node_modules_next_dist_pages__app_js.js
+³   ³   ³   ³   _pages-dir-browser_node_modules_next_dist_pages__error_js.js
 ³   ³   ³   ³   
-³   ³   ³   ÀÄÄÄapp
-³   ³   ³       ³   layout.js
-³   ³   ³       ³   
-³   ³   ³       ÃÄÄÄ(app)
-³   ³   ³       ³   ³   layout.js
-³   ³   ³       ³   ³   
-³   ³   ³       ³   ÃÄÄÄdashboard
-³   ³   ³       ³   ³       page.js
-³   ³   ³       ³   ³       
-³   ³   ³       ³   ÀÄÄÄlicenses
-³   ³   ³       ³           page.js
-³   ³   ³       ³           
-³   ³   ³       ÃÄÄÄapi
-³   ³   ³       ³   ÃÄÄÄadmin
-³   ³   ³       ³   ³   ÀÄÄÄlicenses
-³   ³   ³       ³   ³       ÃÄÄÄlist
-³   ³   ³       ³   ³       ³       route.js
-³   ³   ³       ³   ³       ³       
-³   ³   ³       ³   ³       ÀÄÄÄupdate
-³   ³   ³       ³   ³               route.js
-³   ³   ³       ³   ³               
-³   ³   ³       ³   ÀÄÄÄlicense
-³   ³   ³       ³       ÀÄÄÄstatus
-³   ³   ³       ³               route.js
-³   ³   ³       ³               
-³   ³   ³       ÀÄÄÄauth
-³   ³   ³           ÀÄÄÄlogin
-³   ³   ³                   page.js
-³   ³   ³                   
+³   ³   ³   ÃÄÄÄapp
+³   ³   ³   ³   ³   layout.js
+³   ³   ³   ³   ³   
+³   ³   ³   ³   ÀÄÄÄ(app)
+³   ³   ³   ³       ³   layout.js
+³   ³   ³   ³       ³   
+³   ³   ³   ³       ÀÄÄÄform-builder
+³   ³   ³   ³               page.js
+³   ³   ³   ³               
+³   ³   ³   ÃÄÄÄfallback
+³   ³   ³   ³   ³   amp.js
+³   ³   ³   ³   ³   main-app.js
+³   ³   ³   ³   ³   main.js
+³   ³   ³   ³   ³   react-refresh.js
+³   ³   ³   ³   ³   webpack.js
+³   ³   ³   ³   ³   _app-pages-browser_node_modules_next_dist_client_dev_noop-turbopack-hmr_js.js
+³   ³   ³   ³   ³   _pages-dir-browser_node_modules_next_dist_pages__app_js.js
+³   ³   ³   ³   ³   _pages-dir-browser_node_modules_next_dist_pages__error_js.js
+³   ³   ³   ³   ³   
+³   ³   ³   ³   ÀÄÄÄpages
+³   ³   ³   ³           _app.js
+³   ³   ³   ³           _error.js
+³   ³   ³   ³           
+³   ³   ³   ÀÄÄÄpages
+³   ³   ³           _app.js
+³   ³   ³           _error.js
+³   ³   ³           
 ³   ³   ÃÄÄÄcss
 ³   ³   ³   ÀÄÄÄapp
 ³   ³   ³           layout.css
@@ -252,7 +256,7 @@ C:.
 ³   ³   ³       _ssgManifest.js
 ³   ³   ³       
 ³   ³   ÃÄÄÄmedia
-³   ³   ³       569ce4b8f30dc480-s.p.woff2
+³   ³   ³       4cf2300e9c8272f7-s.p.woff2
 ³   ³   ³       747892c23ea88013-s.woff2
 ³   ³   ³       8d697b304b401681-s.woff2
 ³   ³   ³       93f479601ee12b01-s.p.woff2
@@ -260,42 +264,102 @@ C:.
 ³   ³   ³       ba015fad6dcf6784-s.woff2
 ³   ³   ³       
 ³   ³   ÀÄÄÄwebpack
-³   ³       ³   08754abc5551d7a4.webpack.hot-update.json
-³   ³       ³   0e2256ca786dc6bb.webpack.hot-update.json
-³   ³       ³   14659410364d40a8.webpack.hot-update.json
-³   ³       ³   16fb38714d3c19ee.webpack.hot-update.json
-³   ³       ³   5bec2e2cde2462b7.webpack.hot-update.json
-³   ³       ³   5fd0ad8b9211454e.webpack.hot-update.json
+³   ³       ³   0222e20d1816de14.webpack.hot-update.json
+³   ³       ³   070b4066ffe4f8eb.webpack.hot-update.json
+³   ³       ³   08c61342d7e2b047.webpack.hot-update.json
+³   ³       ³   1600d67153713eea.webpack.hot-update.json
+³   ³       ³   230ec14a0fa856d7.webpack.hot-update.json
+³   ³       ³   27803b4b770ec4b5.webpack.hot-update.json
+³   ³       ³   2e9d352d17e3af26.webpack.hot-update.json
+³   ³       ³   33b40fdc3d527368.webpack.hot-update.json
+³   ³       ³   37e799be25ea7da4.webpack.hot-update.json
+³   ³       ³   3a502ec3b9558a5e.webpack.hot-update.json
+³   ³       ³   40853c5654612586.webpack.hot-update.json
+³   ³       ³   5a76d1fd4e1842c2.webpack.hot-update.json
+³   ³       ³   5b7c8e713ed05c42.webpack.hot-update.json
+³   ³       ³   5e08f733271f2294.webpack.hot-update.json
+³   ³       ³   5e5678ad93e19432.webpack.hot-update.json
+³   ³       ³   623c4e5ca5bcfed8.webpack.hot-update.json
 ³   ³       ³   633457081244afec._.hot-update.json
-³   ³       ³   6c1f4544bf710ada.webpack.hot-update.json
-³   ³       ³   81507fd34aa7987e.webpack.hot-update.json
-³   ³       ³   8ed0f52f90a32213.webpack.hot-update.json
-³   ³       ³   a5b93746cc94d852.webpack.hot-update.json
-³   ³       ³   e25ff4ae3e72b6bf.webpack.hot-update.json
-³   ³       ³   webpack.08754abc5551d7a4.hot-update.js
-³   ³       ³   webpack.0e2256ca786dc6bb.hot-update.js
-³   ³       ³   webpack.14659410364d40a8.hot-update.js
-³   ³       ³   webpack.16fb38714d3c19ee.hot-update.js
-³   ³       ³   webpack.5bec2e2cde2462b7.hot-update.js
-³   ³       ³   webpack.5fd0ad8b9211454e.hot-update.js
-³   ³       ³   webpack.6c1f4544bf710ada.hot-update.js
-³   ³       ³   webpack.81507fd34aa7987e.hot-update.js
-³   ³       ³   webpack.8ed0f52f90a32213.hot-update.js
-³   ³       ³   webpack.a5b93746cc94d852.hot-update.js
-³   ³       ³   webpack.e25ff4ae3e72b6bf.hot-update.js
+³   ³       ³   6d5349b9a201863b.webpack.hot-update.json
+³   ³       ³   76f0e148b9183396.webpack.hot-update.json
+³   ³       ³   8965ac8aedf3de8d.webpack.hot-update.json
+³   ³       ³   9b7bd3d78c1a5819.webpack.hot-update.json
+³   ³       ³   9bb0eb66281bd485.webpack.hot-update.json
+³   ³       ³   ac92b06782b00075.webpack.hot-update.json
+³   ³       ³   ae2ad6aca71a8962.webpack.hot-update.json
+³   ³       ³   app-pages-internals.070b4066ffe4f8eb.hot-update.js
+³   ³       ³   app-pages-internals.2e9d352d17e3af26.hot-update.js
+³   ³       ³   c6b0e83de41a799c.webpack.hot-update.json
+³   ³       ³   ca37bb49765a09cd.webpack.hot-update.json
+³   ³       ³   d0c83ce84df26a45.webpack.hot-update.json
+³   ³       ³   e5a45a827cc420cd.webpack.hot-update.json
+³   ³       ³   f12ffe74457358ef.webpack.hot-update.json
+³   ³       ³   fdc635e42e23daf8.webpack.hot-update.json
+³   ³       ³   main.070b4066ffe4f8eb.hot-update.js
+³   ³       ³   main.ac92b06782b00075.hot-update.js
+³   ³       ³   webpack.0222e20d1816de14.hot-update.js
+³   ³       ³   webpack.070b4066ffe4f8eb.hot-update.js
+³   ³       ³   webpack.08c61342d7e2b047.hot-update.js
+³   ³       ³   webpack.1600d67153713eea.hot-update.js
+³   ³       ³   webpack.230ec14a0fa856d7.hot-update.js
+³   ³       ³   webpack.27803b4b770ec4b5.hot-update.js
+³   ³       ³   webpack.2e9d352d17e3af26.hot-update.js
+³   ³       ³   webpack.33b40fdc3d527368.hot-update.js
+³   ³       ³   webpack.37e799be25ea7da4.hot-update.js
+³   ³       ³   webpack.3a502ec3b9558a5e.hot-update.js
+³   ³       ³   webpack.40853c5654612586.hot-update.js
+³   ³       ³   webpack.5a76d1fd4e1842c2.hot-update.js
+³   ³       ³   webpack.5b7c8e713ed05c42.hot-update.js
+³   ³       ³   webpack.5e08f733271f2294.hot-update.js
+³   ³       ³   webpack.5e5678ad93e19432.hot-update.js
+³   ³       ³   webpack.623c4e5ca5bcfed8.hot-update.js
+³   ³       ³   webpack.6d5349b9a201863b.hot-update.js
+³   ³       ³   webpack.76f0e148b9183396.hot-update.js
+³   ³       ³   webpack.8965ac8aedf3de8d.hot-update.js
+³   ³       ³   webpack.9b7bd3d78c1a5819.hot-update.js
+³   ³       ³   webpack.9bb0eb66281bd485.hot-update.js
+³   ³       ³   webpack.ac92b06782b00075.hot-update.js
+³   ³       ³   webpack.ae2ad6aca71a8962.hot-update.js
+³   ³       ³   webpack.c6b0e83de41a799c.hot-update.js
+³   ³       ³   webpack.ca37bb49765a09cd.hot-update.js
+³   ³       ³   webpack.d0c83ce84df26a45.hot-update.js
+³   ³       ³   webpack.e5a45a827cc420cd.hot-update.js
+³   ³       ³   webpack.f12ffe74457358ef.hot-update.js
+³   ³       ³   webpack.fdc635e42e23daf8.hot-update.js
 ³   ³       ³   
 ³   ³       ÀÄÄÄapp
-³   ³           ³   layout.08754abc5551d7a4.hot-update.js
-³   ³           ³   layout.0e2256ca786dc6bb.hot-update.js
-³   ³           ³   layout.14659410364d40a8.hot-update.js
-³   ³           ³   layout.16fb38714d3c19ee.hot-update.js
-³   ³           ³   layout.5bec2e2cde2462b7.hot-update.js
-³   ³           ³   layout.5fd0ad8b9211454e.hot-update.js
-³   ³           ³   layout.e25ff4ae3e72b6bf.hot-update.js
+³   ³           ³   layout.0222e20d1816de14.hot-update.js
+³   ³           ³   layout.08c61342d7e2b047.hot-update.js
+³   ³           ³   layout.1600d67153713eea.hot-update.js
+³   ³           ³   layout.230ec14a0fa856d7.hot-update.js
+³   ³           ³   layout.27803b4b770ec4b5.hot-update.js
+³   ³           ³   layout.33b40fdc3d527368.hot-update.js
+³   ³           ³   layout.37e799be25ea7da4.hot-update.js
+³   ³           ³   layout.3a502ec3b9558a5e.hot-update.js
+³   ³           ³   layout.40853c5654612586.hot-update.js
+³   ³           ³   layout.5a76d1fd4e1842c2.hot-update.js
+³   ³           ³   layout.5b7c8e713ed05c42.hot-update.js
+³   ³           ³   layout.5e08f733271f2294.hot-update.js
+³   ³           ³   layout.5e5678ad93e19432.hot-update.js
+³   ³           ³   layout.6d5349b9a201863b.hot-update.js
+³   ³           ³   layout.76f0e148b9183396.hot-update.js
+³   ³           ³   layout.8965ac8aedf3de8d.hot-update.js
+³   ³           ³   layout.9bb0eb66281bd485.hot-update.js
+³   ³           ³   layout.ae2ad6aca71a8962.hot-update.js
+³   ³           ³   layout.c6b0e83de41a799c.hot-update.js
+³   ³           ³   layout.ca37bb49765a09cd.hot-update.js
+³   ³           ³   layout.d0c83ce84df26a45.hot-update.js
+³   ³           ³   layout.e5a45a827cc420cd.hot-update.js
+³   ³           ³   layout.f12ffe74457358ef.hot-update.js
+³   ³           ³   layout.fdc635e42e23daf8.hot-update.js
 ³   ³           ³   
 ³   ³           ÀÄÄÄ(app)
-³   ³               ÀÄÄÄlicenses
-³   ³                       page.16fb38714d3c19ee.hot-update.js
+³   ³               ÀÄÄÄform-builder
+³   ³                       page.9bb0eb66281bd485.hot-update.js
+³   ³                       page.d0c83ce84df26a45.hot-update.js
+³   ³                       page.e5a45a827cc420cd.hot-update.js
+³   ³                       page.fdc635e42e23daf8.hot-update.js
 ³   ³                       
 ³   ÀÄÄÄtypes
 ³       ³   cache-life.d.ts
@@ -306,30 +370,10 @@ C:.
 ³       ÀÄÄÄapp
 ³           ³   layout.ts
 ³           ³   
-³           ÃÄÄÄ(app)
-³           ³   ³   layout.ts
-³           ³   ³   
-³           ³   ÃÄÄÄdashboard
-³           ³   ³       page.ts
-³           ³   ³       
-³           ³   ÀÄÄÄlicenses
-³           ³           page.ts
-³           ³           
-³           ÃÄÄÄapi
-³           ³   ÃÄÄÄadmin
-³           ³   ³   ÀÄÄÄlicenses
-³           ³   ³       ÃÄÄÄlist
-³           ³   ³       ³       route.ts
-³           ³   ³       ³       
-³           ³   ³       ÀÄÄÄupdate
-³           ³   ³               route.ts
-³           ³   ³               
-³           ³   ÀÄÄÄlicense
-³           ³       ÀÄÄÄstatus
-³           ³               route.ts
-³           ³               
-³           ÀÄÄÄauth
-³               ÀÄÄÄlogin
+³           ÀÄÄÄ(app)
+³               ³   layout.ts
+³               ³   
+³               ÀÄÄÄform-builder
 ³                       page.ts
 ³                       
 ÃÄÄÄapp
@@ -343,52 +387,83 @@ C:.
 ³   ³   ³   layout.tsx
 ³   ³   ³   
 ³   ³   ÃÄÄÄannual-leave
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄappointments
+³   ³   ³       layout.tsx
+³   ³   ³       page.tsx
+³   ³   ³       
+³   ³   ÃÄÄÄaudit
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄbookings
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄbudgets
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
+³   ³   ÃÄÄÄcars
 ³   ³   ÃÄÄÄdashboard
+³   ³   ³       page.tsx
+³   ³   ³       
+³   ³   ÃÄÄÄform-builder
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄhelp-centre
 ³   ³   ³       page.tsx
 ³   ³   ³       
+³   ³   ÃÄÄÄhome
 ³   ³   ÃÄÄÄlicenses
+³   ³   ³   ³   layout.tsx
 ³   ³   ³   ³   page.tsx
 ³   ³   ³   ³   
 ³   ³   ³   ÀÄÄÄui
 ³   ³   ³           LicenseAdminClient.tsx
 ³   ³   ³           
 ³   ³   ÃÄÄÄManagement
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄpayslips
+³   ³   ³       layout.tsx
+³   ³   ³       page.tsx
+³   ³   ³       
+³   ³   ÃÄÄÄpolicies
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄrotas
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄsupervisions
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄtimesheets
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
 ³   ³   ÃÄÄÄtraining
+³   ³   ³       layout.tsx
 ³   ³   ³       page.tsx
 ³   ³   ³       
+³   ³   ÃÄÄÄyoung-people
+³   ³   ÃÄÄÄ_actions
+³   ³   ³       theme.ts
+³   ³   ³       
 ³   ³   ÀÄÄÄ_components
+³   ³           AnnouncementsSidebar.tsx
+³   ³           feature-gate.tsx
 ³   ³           LicenseGate.tsx
 ³   ³           MobileSidebar.tsx
 ³   ³           NotificationBell.tsx
 ³   ³           Sidebar.tsx
+³   ³           ThemeCSSBridge.tsx
+³   ³           ThemeToggle.tsx
 ³   ³           UserChip.tsx
 ³   ³           
 ³   ÃÄÄÄapi
@@ -413,6 +488,9 @@ C:.
 ³   ³   ³   ³           route.ts
 ³   ³   ³   ³           
 ³   ³   ³   ÀÄÄÄpeople
+³   ³   ³       ÃÄÄÄreset-password
+³   ³   ³       ³       route.ts
+³   ³   ³       ³       
 ³   ³   ³       ÀÄÄÄupdate
 ³   ³   ³               route.ts
 ³   ³   ³               
@@ -452,6 +530,9 @@ C:.
 ³   ³   ³       ÀÄÄÄupdate-role
 ³   ³   ³               route.ts
 ³   ³   ³               
+³   ³   ÃÄÄÄtheme
+³   ³   ³       route.ts
+³   ³   ³       
 ³   ³   ÀÄÄÄvalidate
 ³   ³           route.ts
 ³   ³           
@@ -459,8 +540,17 @@ C:.
 ³   ³   ÃÄÄÄlogin
 ³   ³   ³       page.tsx
 ³   ³   ³       
-³   ³   ÀÄÄÄlogout
-³   ³           route.ts
+³   ³   ÃÄÄÄlogout
+³   ³   ³       route.ts
+³   ³   ³       
+³   ³   ÃÄÄÄreset
+³   ³   ³       page.tsx
+³   ³   ³       
+³   ³   ÃÄÄÄset-password
+³   ³   ³       page.tsx
+³   ³   ³       
+³   ³   ÀÄÄÄwelcome
+³   ³           page.tsx
 ³   ³           
 ³   ÀÄÄÄdebug
 ³       ÀÄÄÄauth
@@ -468,6 +558,7 @@ C:.
 ³               
 ÃÄÄÄlib
 ³       requester.ts
+³       theme.ts
 ³       
 ÃÄÄÄnode_modules
 ³   ³   .package-lock.json

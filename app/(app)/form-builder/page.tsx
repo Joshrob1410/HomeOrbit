@@ -1,5 +1,7 @@
-﻿'use client';
+﻿// app/(app)/form-builder/page.tsx
+'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/supabase/client';
 import { getEffectiveLevel, type AppLevel } from '@/supabase/roles';
@@ -20,9 +22,19 @@ type ViewState =
         selectedCompanyId: string | null;
     };
 
-type TabKey = 'CATEGORIES' | 'FORMS';
-
 type HeadKey = 'YOUNG_PEOPLE' | 'CARS' | 'HOME';
+
+type FormStatus = 'DRAFT' | 'PUBLISHED';
+
+type FormSummary = {
+    id: string;
+    company_id: string;
+    head: HeadKey;
+    name: string;
+    status: FormStatus;
+    form_type: 'FIXED' | 'ADJUSTABLE';
+    updated_at: string | null;
+};
 
 const HEADS: {
     key: HeadKey;
@@ -62,20 +74,11 @@ type Category = {
 
 export default function Page() {
     const [view, setView] = useState<ViewState>({ status: 'loading' });
-    const [tab, setTab] = useState<TabKey>('CATEGORIES');
 
     // Category UI state
     const [activeHead, setActiveHead] = useState<HeadKey>('YOUNG_PEOPLE');
     const [categories, setCategories] = useState<Category[]>([]);
     const [loadingCats, setLoadingCats] = useState(false);
-
-    // Create category state
-    const [showCreate, setShowCreate] = useState(false);
-    const [newName, setNewName] = useState('');
-    const [newDescription, setNewDescription] = useState('');
-    const [newHead, setNewHead] = useState<HeadKey>('YOUNG_PEOPLE');
-    const [savingNew, setSavingNew] = useState(false);
-    const [newError, setNewError] = useState<string | null>(null);
 
     // Edit category state
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -84,9 +87,13 @@ export default function Page() {
     const [editHead, setEditHead] = useState<HeadKey>('YOUNG_PEOPLE');
     const [savingEdit, setSavingEdit] = useState(false);
 
-    // Delete confirmation state (UI only, no window.confirm)
+    // Delete confirmation state
     const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
+
+    // Forms under current head
+    const [forms, setForms] = useState<FormSummary[]>([]);
+    const [loadingForms, setLoadingForms] = useState(false);
 
     /** ========= Load session + level + companies (admin only) ========= */
     useEffect(() => {
@@ -139,9 +146,7 @@ export default function Page() {
         };
     }, []);
 
-    const isAdmin =
-        view.status === 'ready' && view.level === '1_ADMIN';
-
+    const isAdmin = view.status === 'ready' && view.level === '1_ADMIN';
     const selectedCompanyId =
         view.status === 'ready' ? view.selectedCompanyId : null;
 
@@ -182,6 +187,43 @@ export default function Page() {
         };
     }, [isAdmin, selectedCompanyId]);
 
+    /** ========= Load forms for selected company + head ========= */
+    useEffect(() => {
+        if (!isAdmin || !selectedCompanyId) {
+            setForms([]);
+            return;
+        }
+
+        let cancelled = false;
+        setLoadingForms(true);
+
+        (async () => {
+            const { data, error } = await supabase
+                .from('form_blueprints')
+                .select(
+                    'id, company_id, head, name, status, form_type, updated_at'
+                )
+                .eq('company_id', selectedCompanyId)
+                .eq('head', activeHead)
+                .order('status', { ascending: true }) // drafts first
+                .order('name', { ascending: true });
+
+            if (cancelled) return;
+
+            if (error) {
+                console.error('❌ load form_blueprints failed', error);
+                setForms([]);
+            } else {
+                setForms((data ?? []) as FormSummary[]);
+            }
+            setLoadingForms(false);
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isAdmin, selectedCompanyId, activeHead]);
+
     const categoriesForHead = useMemo(
         () =>
             categories.filter(
@@ -189,62 +231,6 @@ export default function Page() {
             ),
         [categories, activeHead]
     );
-
-    /** ========= Create category ========= */
-    const handleCreateCategory = async () => {
-        if (!isAdmin || !selectedCompanyId) return;
-
-        const name = newName.trim();
-        const description = newDescription.trim();
-        if (!name) {
-            setNewError('Please enter a name.');
-            return;
-        }
-
-        setSavingNew(true);
-        setNewError(null);
-
-        const { data, error } = await supabase
-            .from('form_categories')
-            .insert({
-                company_id: selectedCompanyId,
-                name,
-                description: description || null,
-                head: newHead,
-            })
-            .select(
-                'id, company_id, name, description, head, is_active, order_index'
-            )
-            .single();
-
-        setSavingNew(false);
-
-        if (error) {
-            console.error('❌ insert form_categories failed', error);
-
-            if (error.code === '23505') {
-                setNewError(
-                    'A category with this name already exists under this head.'
-                );
-            } else {
-                setNewError('Something went wrong. Please try again.');
-            }
-            return;
-        }
-
-        if (data) {
-            setCategories((prev) =>
-                [...prev, data as Category].sort((a, b) =>
-                    a.name.localeCompare(b.name)
-                )
-            );
-        }
-
-        setShowCreate(false);
-        setNewName('');
-        setNewDescription('');
-        setNewHead(activeHead);
-    };
 
     /** ========= Start editing ========= */
     const startEdit = (cat: Category) => {
@@ -378,13 +364,45 @@ export default function Page() {
                         className="text-xl md:text-2xl font-semibold tracking-tight"
                         style={{ color: 'var(--ink)' }}
                     >
-                        Form Builder
+                        Forms & Categories
                     </h1>
                     <p className="text-sm" style={{ color: 'var(--sub)' }}>
-                        Define reusable categories and forms that sit under your
-                        Young People, Cars and Homes.
+                        Use categories to organise the forms you’ll design in the
+                        full-screen Form Builder.
                     </p>
                 </div>
+
+                {/* Fancy "Enter Form Builder" CTA */}
+                <Link
+                    href={
+                        selectedCompanyId
+                            ? `/form-builder/workspace?companyId=${selectedCompanyId}`
+                            : '/form-builder/workspace'
+                    }
+                    className="group rounded-xl p-[1px] shadow-sm hover:shadow-md transition-transform hover:-translate-y-[1px]"
+                    style={{ background: BRAND_GRADIENT }}
+                >
+                    <div
+                        className="flex items-center gap-3 rounded-[0.70rem] px-3 py-2"
+                        style={{ background: 'var(--panel-bg)' }}
+                    >
+                        <div className="flex items-center gap-2">
+                            <span className="text-lg">✨</span>
+                            <span
+                                className="text-sm font-semibold"
+                                style={{ color: 'var(--ink)' }}
+                            >
+                                Enter Form Builder
+                            </span>
+                        </div>
+                        <span
+                            className="text-xs group-hover:translate-x-[2px] transition-transform"
+                            style={{ color: 'var(--sub)' }}
+                        >
+                            Full-screen form designer →
+                        </span>
+                    </div>
+                </Link>
             </div>
 
             {/* Company selector */}
@@ -411,7 +429,6 @@ export default function Page() {
                                 : { ...v, selectedCompanyId: id }
                         );
                         setEditingId(null);
-                        setShowCreate(false);
                         setPendingDeleteId(null);
                     }}
                 >
@@ -423,401 +440,265 @@ export default function Page() {
                 </select>
             </div>
 
-            {/* Tabs */}
-            <div className="flex gap-2">
-                <button
-                    type="button"
-                    onClick={() => setTab('CATEGORIES')}
-                    className="px-3 py-1.5 rounded-md ring-1 text-sm transition-transform hover:-translate-y-[1px]"
-                    style={
-                        tab === 'CATEGORIES'
-                            ? {
-                                background: BRAND_GRADIENT,
-                                color: '#FFFFFF',
-                                borderColor: 'var(--ring-strong)',
-                            }
-                            : {
-                                background: 'var(--nav-item-bg)',
-                                color: 'var(--ink)',
-                                borderColor: 'var(--ring)',
-                            }
-                    }
-                >
-                    Categories
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setTab('FORMS')}
-                    className="px-3 py-1.5 rounded-md ring-1 text-sm transition-transform hover:-translate-y-[1px]"
-                    style={
-                        tab === 'FORMS'
-                            ? {
-                                background: BRAND_GRADIENT,
-                                color: '#FFFFFF',
-                                borderColor: 'var(--ring-strong)',
-                            }
-                            : {
-                                background: 'var(--nav-item-bg)',
-                                color: 'var(--ink)',
-                                borderColor: 'var(--ring)',
-                            }
-                    }
-                >
-                    Forms
-                </button>
+            {/* Heads as cards */}
+            <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {HEADS.map((h) => {
+                        const isActive = activeHead === h.key;
+                        return (
+                            <HeadCard
+                                key={h.key}
+                                head={h}
+                                active={isActive}
+                                onClick={() => {
+                                    setActiveHead(h.key);
+                                    cancelEdit();
+                                    setPendingDeleteId(null);
+                                }}
+                            />
+                        );
+                    })}
+                </div>
+                <p className="text-xs" style={{ color: 'var(--sub)' }}>
+                    Click a head to see its categories and forms. Categories are used
+                    to group forms inside the Form Builder.
+                </p>
             </div>
 
-            {tab === 'CATEGORIES' ? (
-                <div className="space-y-5">
-                    {/* Top bar: create + brief help */}
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                        <div className="space-y-1 max-w-xl text-sm">
-                            <p style={{ color: 'var(--sub)' }}>
-                                Start by creating categories under a head. For
-                                example,{' '}
-                                <span className="italic">
-                                    Daily summaries
-                                </span>{' '}
-                                under Young People, or{' '}
-                                <span className="italic">Vehicle check</span>{' '}
-                                under Cars.
-                            </p>
-                        </div>
-
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setShowCreate((s) => !s);
-                                setNewError(null);
-                                setNewHead(activeHead);
-                            }}
-                            className="self-start inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium ring-1 transition active:scale-[0.98] shadow-sm"
-                            style={{
-                                background: BRAND_GRADIENT,
-                                color: '#FFFFFF',
-                                borderColor: 'var(--ring-strong)',
-                            }}
-                        >
-                            + Create a category
-                        </button>
-                    </div>
-
-                    {/* Inline create form */}
-                    {showCreate && (
-                        <div
-                            className="rounded-xl p-4 ring-1 max-w-xl"
-                            style={{
-                                background: 'var(--card-grad)',
-                                borderColor: 'var(--ring)',
-                            }}
-                        >
-                            <div className="grid gap-3">
-                                <div>
-                                    <label
-                                        className="block text-xs mb-1"
-                                        style={{
-                                            color: 'var(--sub)',
-                                        }}
-                                    >
-                                        Category name
-                                    </label>
-                                    <input
-                                        type="text"
-                                        className="w-full rounded-md px-2 py-2 text-sm ring-1"
-                                        style={{
-                                            background:
-                                                'var(--nav-item-bg)',
-                                            color: 'var(--ink)',
-                                            borderColor: 'var(--ring)',
-                                        }}
-                                        value={newName}
-                                        onChange={(e) =>
-                                            setNewName(e.target.value)
-                                        }
-                                        placeholder="e.g. Daily summaries"
-                                    />
-                                </div>
-
-                                <div>
-                                    <label
-                                        className="block text-xs mb-1"
-                                        style={{
-                                            color: 'var(--sub)',
-                                        }}
-                                    >
-                                        Description (optional)
-                                    </label>
-                                    <textarea
-                                        rows={2}
-                                        className="w-full rounded-md px-2 py-2 text-sm ring-1 resize-none"
-                                        style={{
-                                            background:
-                                                'var(--nav-item-bg)',
-                                            color: 'var(--ink)',
-                                            borderColor: 'var(--ring)',
-                                        }}
-                                        value={newDescription}
-                                        onChange={(e) =>
-                                            setNewDescription(e.target.value)
-                                        }
-                                        placeholder="Short description to remind staff what this category is for."
-                                    />
-                                </div>
-
-                                <div>
-                                    <span
-                                        className="block text-xs mb-1"
-                                        style={{
-                                            color: 'var(--sub)',
-                                        }}
-                                    >
-                                        Where does this belong?
-                                    </span>
-                                    <HeadSelector
-                                        value={newHead}
-                                        onChange={setNewHead}
-                                    />
-                                </div>
-
-                                {newError && (
-                                    <p
-                                        className="text-xs"
-                                        style={{ color: '#DC2626' }}
-                                    >
-                                        {newError}
-                                    </p>
-                                )}
-
-                                <div className="flex justify-end gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setShowCreate(false);
-                                            setNewName('');
-                                            setNewDescription('');
-                                            setNewError(null);
-                                        }}
-                                        className="px-3 py-2 text-sm rounded-md ring-1"
-                                        style={{
-                                            background:
-                                                'var(--nav-item-bg)',
-                                            color: 'var(--ink)',
-                                            borderColor: 'var(--ring)',
-                                        }}
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={
-                                            savingNew
-                                                ? undefined
-                                                : handleCreateCategory
-                                        }
-                                        disabled={savingNew}
-                                        className="px-3 py-2 text-sm rounded-md"
-                                        style={{
-                                            background: BRAND_GRADIENT,
-                                            color: '#FFFFFF',
-                                            opacity: savingNew ? 0.7 : 1,
-                                        }}
-                                    >
-                                        {savingNew
-                                            ? 'Saving…'
-                                            : 'Save category'}
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Heads as cards */}
-                    <div className="space-y-3">
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            {HEADS.map((h) => {
-                                const isActive = activeHead === h.key;
-                                return (
-                                    <HeadCard
-                                        key={h.key}
-                                        head={h}
-                                        active={isActive}
-                                        onClick={() => {
-                                            setActiveHead(h.key);
-                                            cancelEdit();
-                                            setPendingDeleteId(null);
-                                        }}
-                                    />
-                                );
-                            })}
-                        </div>
-                        <p
-                            className="text-xs"
-                            style={{ color: 'var(--sub)' }}
-                        >
-                            Click a head to see its categories. Cards highlight
-                            in both light and Orbit (dark) modes.
-                        </p>
-                    </div>
-
-                    {/* Categories list */}
+            {/* Categories list */}
+            <div
+                className="rounded-xl ring-1 overflow-hidden"
+                style={{
+                    background: 'var(--card-grad)',
+                    borderColor: 'var(--ring)',
+                }}
+            >
+                <div
+                    className="px-3 py-2 flex items-center justify-between"
+                    style={{
+                        borderBottom: '1px solid var(--ring)',
+                        background: 'var(--nav-item-bg)',
+                    }}
+                >
                     <div
-                        className="rounded-xl ring-1 overflow-hidden"
-                        style={{
-                            background: 'var(--card-grad)',
-                            borderColor: 'var(--ring)',
-                        }}
+                        className="font-medium text-sm"
+                        style={{ color: 'var(--ink)' }}
                     >
-                        <div
-                            className="px-3 py-2 flex items-center justify-between"
-                            style={{
-                                borderBottom: '1px solid var(--ring)',
-                                background: 'var(--nav-item-bg)',
-                            }}
-                        >
-                            <div
-                                className="font-medium text-sm"
-                                style={{ color: 'var(--ink)' }}
-                            >
-                                {HEADS.find(
-                                    (h) => h.key === activeHead
-                                )?.label || 'Categories'}
-                            </div>
-                            <div
-                                className="text-xs"
-                                style={{ color: 'var(--sub)' }}
-                            >
-                                {loadingCats
-                                    ? 'Loading…'
-                                    : `${categoriesForHead.length} categor${categoriesForHead.length === 1
-                                        ? 'y'
-                                        : 'ies'
-                                    }`}
-                            </div>
-                        </div>
+                        {HEADS.find((h) => h.key === activeHead)?.label ||
+                            'Categories'}
+                    </div>
+                    <div className="text-xs" style={{ color: 'var(--sub)' }}>
+                        {loadingCats
+                            ? 'Loading…'
+                            : `${categoriesForHead.length} categor${categoriesForHead.length === 1 ? 'y' : 'ies'
+                            }`}
+                    </div>
+                </div>
 
-                        {loadingCats ? (
-                            <div
-                                className="p-4 text-sm"
-                                style={{ color: 'var(--sub)' }}
-                            >
-                                Loading categories…
-                            </div>
-                        ) : categoriesForHead.length === 0 ? (
-                            <div
-                                className="p-4 text-sm"
-                                style={{ color: 'var(--sub)' }}
-                            >
-                                No categories yet under this head.
-                            </div>
-                        ) : (
-                            <ul
-                                className="divide-y"
-                                style={{ borderColor: 'var(--ring)' }}
-                            >
-                                {categoriesForHead.map((cat) => {
-                                    const isEditing =
-                                        editingId === cat.id;
-                                    const isPendingDelete =
-                                        pendingDeleteId === cat.id;
-                                    const isDeleting =
-                                        deletingId === cat.id;
+                {loadingCats ? (
+                    <div className="p-4 text-sm" style={{ color: 'var(--sub)' }}>
+                        Loading categories…
+                    </div>
+                ) : categoriesForHead.length === 0 ? (
+                    <div className="p-4 text-sm" style={{ color: 'var(--sub)' }}>
+                        No categories yet under this head.
+                    </div>
+                ) : (
+                    <ul
+                        className="divide-y"
+                        style={{ borderColor: 'var(--ring)' }}
+                    >
+                        {categoriesForHead.map((cat) => {
+                            const isEditing = editingId === cat.id;
+                            const isPendingDelete = pendingDeleteId === cat.id;
+                            const isDeleting = deletingId === cat.id;
 
-                                    return (
-                                        <li
-                                            key={cat.id}
-                                            className="px-3 py-3"
-                                            style={{
-                                                background:
-                                                    'var(--nav-item-bg)',
-                                            }}
-                                        >
-                                            {isEditing ? (
-                                                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4">
-                                                    <div className="flex-1 space-y-2">
-                                                        <input
-                                                            type="text"
-                                                            className="w-full rounded-md px-2 py-2 text-sm ring-1"
-                                                            style={{
-                                                                background:
-                                                                    'var(--panel-bg)',
-                                                                color: 'var(--ink)',
-                                                                borderColor:
-                                                                    'var(--ring)',
-                                                            }}
-                                                            value={editName}
-                                                            onChange={(e) =>
-                                                                setEditName(
-                                                                    e.target
-                                                                        .value
-                                                                )
-                                                            }
-                                                        />
-                                                        <textarea
-                                                            rows={2}
-                                                            className="w-full rounded-md px-2 py-2 text-xs ring-1 resize-none"
-                                                            style={{
-                                                                background:
-                                                                    'var(--panel-bg)',
-                                                                color: 'var(--ink)',
-                                                                borderColor:
-                                                                    'var(--ring)',
-                                                            }}
-                                                            value={
-                                                                editDescription
-                                                            }
-                                                            onChange={(e) =>
-                                                                setEditDescription(
-                                                                    e.target
-                                                                        .value
-                                                                )
-                                                            }
-                                                            placeholder="Short description (optional)"
-                                                        />
-                                                        <div>
-                                                            <HeadSelector
-                                                                value={
-                                                                    editHead
-                                                                }
-                                                                onChange={
-                                                                    setEditHead
-                                                                }
-                                                                size="sm"
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex gap-2 mt-2 md:mt-0">
+                            return (
+                                <li
+                                    key={cat.id}
+                                    className="px-3 py-3"
+                                    style={{ background: 'var(--nav-item-bg)' }}
+                                >
+                                    {isEditing ? (
+                                        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4">
+                                            <div className="flex-1 space-y-2">
+                                                <input
+                                                    type="text"
+                                                    className="w-full rounded-md px-2 py-2 text-sm ring-1"
+                                                    style={{
+                                                        background:
+                                                            'var(--panel-bg)',
+                                                        color: 'var(--ink)',
+                                                        borderColor:
+                                                            'var(--ring)',
+                                                    }}
+                                                    value={editName}
+                                                    onChange={(e) =>
+                                                        setEditName(
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                />
+                                                <textarea
+                                                    rows={2}
+                                                    className="w-full rounded-md px-2 py-2 text-xs ring-1 resize-none"
+                                                    style={{
+                                                        background:
+                                                            'var(--panel-bg)',
+                                                        color: 'var(--ink)',
+                                                        borderColor:
+                                                            'var(--ring)',
+                                                    }}
+                                                    value={editDescription}
+                                                    onChange={(e) =>
+                                                        setEditDescription(
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                    placeholder="Short description (optional)"
+                                                />
+                                                <div>
+                                                    <HeadSelector
+                                                        value={editHead}
+                                                        onChange={setEditHead}
+                                                        size="sm"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-2 mt-2 md:mt-0">
+                                                <button
+                                                    type="button"
+                                                    onClick={
+                                                        savingEdit
+                                                            ? undefined
+                                                            : handleSaveEdit
+                                                    }
+                                                    disabled={savingEdit}
+                                                    className="px-3 py-1.5 text-sm rounded-md"
+                                                    style={{
+                                                        background:
+                                                            BRAND_GRADIENT,
+                                                        color: '#FFFFFF',
+                                                        opacity: savingEdit
+                                                            ? 0.7
+                                                            : 1,
+                                                    }}
+                                                >
+                                                    {savingEdit
+                                                        ? 'Saving…'
+                                                        : 'Save'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={
+                                                        savingEdit
+                                                            ? undefined
+                                                            : cancelEdit
+                                                    }
+                                                    className="px-3 py-1.5 text-sm rounded-md ring-1"
+                                                    style={{
+                                                        background:
+                                                            'var(--panel-bg)',
+                                                        color: 'var(--ink)',
+                                                        borderColor:
+                                                            'var(--ring)',
+                                                    }}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4">
+                                            <div>
+                                                <div
+                                                    className="text-sm font-medium"
+                                                    style={{
+                                                        color: 'var(--ink)',
+                                                    }}
+                                                >
+                                                    {cat.name}
+                                                </div>
+                                                {cat.description && (
+                                                    <p
+                                                        className="text-xs mt-0.5"
+                                                        style={{
+                                                            color: 'var(--sub)',
+                                                        }}
+                                                    >
+                                                        {cat.description}
+                                                    </p>
+                                                )}
+                                            </div>
+                                            <div className="flex gap-2 mt-1 md:mt-0">
+                                                {!isPendingDelete ? (
+                                                    <>
                                                         <button
                                                             type="button"
-                                                            onClick={
-                                                                savingEdit
-                                                                    ? undefined
-                                                                    : handleSaveEdit
+                                                            onClick={() =>
+                                                                startEdit(cat)
                                                             }
-                                                            disabled={
-                                                                savingEdit
+                                                            className="px-3 py-1.5 text-sm rounded-md ring-1"
+                                                            style={{
+                                                                background:
+                                                                    'var(--panel-bg)',
+                                                                color: 'var(--ink)',
+                                                                borderColor:
+                                                                    'var(--ring)',
+                                                            }}
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                handleDeleteClick(
+                                                                    cat
+                                                                )
                                                             }
+                                                            className="px-3 py-1.5 text-sm rounded-md ring-1"
+                                                            style={{
+                                                                background:
+                                                                    'var(--panel-bg)',
+                                                                color: '#DC2626',
+                                                                borderColor:
+                                                                    'var(--ring)',
+                                                            }}
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                handleConfirmDelete(
+                                                                    cat
+                                                                )
+                                                            }
+                                                            disabled={isDeleting}
                                                             className="px-3 py-1.5 text-sm rounded-md"
                                                             style={{
                                                                 background:
-                                                                    BRAND_GRADIENT,
+                                                                    '#DC2626',
                                                                 color: '#FFFFFF',
                                                                 opacity:
-                                                                    savingEdit
+                                                                    isDeleting
                                                                         ? 0.7
                                                                         : 1,
                                                             }}
                                                         >
-                                                            {savingEdit
-                                                                ? 'Saving…'
-                                                                : 'Save'}
+                                                            {isDeleting
+                                                                ? 'Deleting…'
+                                                                : 'Confirm delete'}
                                                         </button>
                                                         <button
                                                             type="button"
                                                             onClick={
-                                                                savingEdit
-                                                                    ? undefined
-                                                                    : cancelEdit
+                                                                handleCancelDelete
                                                             }
+                                                            disabled={isDeleting}
                                                             className="px-3 py-1.5 text-sm rounded-md ring-1"
                                                             style={{
                                                                 background:
@@ -829,145 +710,140 @@ export default function Page() {
                                                         >
                                                             Cancel
                                                         </button>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4">
-                                                    <div>
-                                                        <div
-                                                            className="text-sm font-medium"
-                                                            style={{
-                                                                color: 'var(--ink)',
-                                                            }}
-                                                        >
-                                                            {cat.name}
-                                                        </div>
-                                                        {cat.description && (
-                                                            <p
-                                                                className="text-xs mt-0.5"
-                                                                style={{
-                                                                    color: 'var(--sub)',
-                                                                }}
-                                                            >
-                                                                {
-                                                                    cat.description
-                                                                }
-                                                            </p>
-                                                        )}
-                                                    </div>
-                                                    <div className="flex gap-2 mt-1 md:mt-0">
-                                                        {!isPendingDelete ? (
-                                                            <>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() =>
-                                                                        startEdit(
-                                                                            cat
-                                                                        )
-                                                                    }
-                                                                    className="px-3 py-1.5 text-sm rounded-md ring-1"
-                                                                    style={{
-                                                                        background:
-                                                                            'var(--panel-bg)',
-                                                                        color: 'var(--ink)',
-                                                                        borderColor:
-                                                                            'var(--ring)',
-                                                                    }}
-                                                                >
-                                                                    Edit
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() =>
-                                                                        handleDeleteClick(
-                                                                            cat
-                                                                        )
-                                                                    }
-                                                                    className="px-3 py-1.5 text-sm rounded-md ring-1"
-                                                                    style={{
-                                                                        background:
-                                                                            'var(--panel-bg)',
-                                                                        color: '#DC2626',
-                                                                        borderColor:
-                                                                            'var(--ring)',
-                                                                    }}
-                                                                >
-                                                                    Delete
-                                                                </button>
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() =>
-                                                                        handleConfirmDelete(
-                                                                            cat
-                                                                        )
-                                                                    }
-                                                                    disabled={
-                                                                        isDeleting
-                                                                    }
-                                                                    className="px-3 py-1.5 text-sm rounded-md"
-                                                                    style={{
-                                                                        background:
-                                                                            '#DC2626',
-                                                                        color: '#FFFFFF',
-                                                                        opacity:
-                                                                            isDeleting
-                                                                                ? 0.7
-                                                                                : 1,
-                                                                    }}
-                                                                >
-                                                                    {isDeleting
-                                                                        ? 'Deleting…'
-                                                                        : 'Confirm delete'}
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={
-                                                                        handleCancelDelete
-                                                                    }
-                                                                    disabled={
-                                                                        isDeleting
-                                                                    }
-                                                                    className="px-3 py-1.5 text-sm rounded-md ring-1"
-                                                                    style={{
-                                                                        background:
-                                                                            'var(--panel-bg)',
-                                                                        color: 'var(--ink)',
-                                                                        borderColor:
-                                                                            'var(--ring)',
-                                                                    }}
-                                                                >
-                                                                    Cancel
-                                                                </button>
-                                                            </>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </li>
-                                    );
-                                })}
-                            </ul>
-                        )}
-                    </div>
-                </div>
-            ) : (
+                                                    </>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                )}
+            </div>
+
+            {/* Forms list for this head */}
+            <div
+                className="rounded-xl ring-1 overflow-hidden"
+                style={{
+                    background: 'var(--card-grad)',
+                    borderColor: 'var(--ring)',
+                }}
+            >
                 <div
-                    className="rounded-lg p-4 ring-1"
+                    className="px-3 py-2 flex items-center justify-between"
                     style={{
-                        background: 'var(--card-grad)',
-                        borderColor: 'var(--ring)',
+                        borderBottom: '1px solid var(--ring)',
+                        background: 'var(--nav-item-bg)',
                     }}
                 >
-                    <p className="text-sm" style={{ color: 'var(--sub)' }}>
-                        Forms will be defined here later. They will be linked to
-                        a head (Young People, Cars, Home) and a category (e.g.
-                        Daily summaries).
-                    </p>
+                    <div
+                        className="font-medium text-sm"
+                        style={{ color: 'var(--ink)' }}
+                    >
+                        Forms under{' '}
+                        {HEADS.find((h) => h.key === activeHead)?.label ??
+                            'this head'}
+                    </div>
+                    <div className="text-xs" style={{ color: 'var(--sub)' }}>
+                        {loadingForms
+                            ? 'Loading…'
+                            : `${forms.length} form${forms.length === 1 ? '' : 's'
+                            }`}
+                    </div>
                 </div>
-            )}
+
+                {loadingForms ? (
+                    <div className="p-4 text-sm" style={{ color: 'var(--sub)' }}>
+                        Loading forms…
+                    </div>
+                ) : forms.length === 0 ? (
+                    <div className="p-4 text-sm" style={{ color: 'var(--sub)' }}>
+                        No forms yet under this head. Use the Form Builder to
+                        create one.
+                    </div>
+                ) : (
+                    <ul
+                        className="divide-y"
+                        style={{ borderColor: 'var(--ring)' }}
+                    >
+                        {forms.map((form) => (
+                            <li
+                                key={form.id}
+                                className="px-3 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2"
+                                style={{ background: 'var(--nav-item-bg)' }}
+                            >
+                                <div className="space-y-1">
+                                    <div
+                                        className="text-sm font-medium"
+                                        style={{ color: 'var(--ink)' }}
+                                    >
+                                        {form.name}
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                                        <span
+                                            className="inline-flex items-center rounded-full px-2 py-[2px] uppercase tracking-wide"
+                                            style={{
+                                                background:
+                                                    form.status === 'PUBLISHED'
+                                                        ? 'rgba(34,197,94,0.16)'
+                                                        : 'rgba(251,191,36,0.16)',
+                                                color:
+                                                    form.status === 'PUBLISHED'
+                                                        ? '#4ADE80'
+                                                        : '#FBBF24',
+                                            }}
+                                        >
+                                            {form.status === 'PUBLISHED'
+                                                ? 'Published'
+                                                : 'Draft'}
+                                        </span>
+                                        <span
+                                            className="inline-flex items-center rounded-full px-2 py-[2px]"
+                                            style={{
+                                                background:
+                                                    'rgba(148,163,184,0.16)',
+                                                color: 'var(--sub)',
+                                            }}
+                                        >
+                                            {form.form_type === 'FIXED'
+                                                ? 'Fixed across company'
+                                                : 'Adjustable per home'}
+                                        </span>
+                                        {form.updated_at && (
+                                            <span
+                                                className="inline-flex items-center rounded-full px-2 py-[2px]"
+                                                style={{
+                                                    background: 'transparent',
+                                                    color: 'var(--sub)',
+                                                }}
+                                            >
+                                                Updated{' '}
+                                                {new Date(
+                                                    form.updated_at
+                                                ).toLocaleDateString()}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="flex gap-2">
+                                    <Link
+                                        href={`/form-builder/workspace?formId=${form.id}`}
+                                        className="px-3 py-1.5 text-sm rounded-md ring-1"
+                                        style={{
+                                            background: 'var(--panel-bg)',
+                                            color: 'var(--ink)',
+                                            borderColor: 'var(--ring)',
+                                        }}
+                                    >
+                                        Open in builder
+                                    </Link>
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
 
             {/* Orbit-friendly select tweaks (like other pages) */}
             <style jsx global>{`
@@ -996,7 +872,7 @@ export default function Page() {
     );
 }
 
-/** ========= Head selector (shared between create + edit) ========= */
+/** ========= Head selector (shared between edit UIs) ========= */
 function HeadSelector({
     value,
     onChange,
@@ -1007,9 +883,7 @@ function HeadSelector({
     size?: 'sm' | 'md';
 }) {
     const base =
-        size === 'sm'
-            ? 'px-2 py-1 text-xs'
-            : 'px-3 py-1.5 text-sm';
+        size === 'sm' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm';
 
     return (
         <div className="inline-flex rounded-lg overflow-hidden ring-1">
