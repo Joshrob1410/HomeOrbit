@@ -449,13 +449,17 @@ export default function FullscreenFormBuilderPage() {
     // Saving flags
     const [isSaving, setIsSaving] = useState(false);
     const [saveError, setSaveError] = useState<string | null>(null);
+    const [isStatusChanging, setIsStatusChanging] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const isPreview = mode === 'PREVIEW';
+    const isPublished = status === 'PUBLISHED';
     const canAutoSave =
         formName.trim().length > 0 && !!formHead && !!companyId;
 
     const isAdmin =
         view.status === 'ready' && view.level === '1_ADMIN';
+
 
     const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
 
@@ -545,7 +549,7 @@ export default function FullscreenFormBuilderPage() {
 
     /** ========= Save form (draft or publish) ========= */
     const saveForm = useCallback(
-        async (mode: 'AUTO' | 'PUBLISH' = 'AUTO') => {
+        async (mode: 'AUTO' | 'PUBLISH' | 'UNPUBLISH' = 'AUTO') => {
             if (!canAutoSave) return;
             if (!companyId) {
                 console.warn('No companyId provided to form builder; cannot save.');
@@ -556,14 +560,14 @@ export default function FullscreenFormBuilderPage() {
                 setIsSaving(true);
                 setSaveError(null);
 
-                // New forms start as DRAFT. Existing forms keep their status
-                // unless this is an explicit PUBLISH action.
                 const nextStatus: FormStatus =
                     mode === 'PUBLISH'
                         ? 'PUBLISHED'
-                        : formId
-                            ? status
-                            : 'DRAFT';
+                        : mode === 'UNPUBLISH'
+                            ? 'DRAFT'
+                            : formId
+                                ? status
+                                : 'DRAFT';
 
                 const payload: {
                     id?: string;
@@ -694,17 +698,59 @@ export default function FullscreenFormBuilderPage() {
 
 
     const handlePublish = async () => {
-        // Publish = save with status = PUBLISHED
-        await saveForm('PUBLISH');
+        if (!canAutoSave || isStatusChanging) return;
+        setIsStatusChanging(true);
+        try {
+            await saveForm('PUBLISH');
+        } finally {
+            setIsStatusChanging(false);
+        }
     };
 
-    const handleDeleteConfirm = () => {
-        // TODO: Hook into a real delete from form_blueprints if you want permanent deletion.
-        setDeleteConfirm(false);
-        router.push('/form-builder');
+    const handleUnpublish = async () => {
+        if (!canAutoSave || isStatusChanging) return;
+        setIsStatusChanging(true);
+        try {
+            await saveForm('UNPUBLISH');
+        } finally {
+            setIsStatusChanging(false);
+        }
     };
+
+    const handleDeleteConfirm = async () => {
+        // If it was never saved (no formId), just exit like before
+        if (!formId) {
+            setDeleteConfirm(false);
+            router.push('/form-builder');
+            return;
+        }
+
+        try {
+            setIsDeleting(true);
+
+            const { error } = await supabase
+                .from('form_blueprints')
+                .delete()
+                .eq('id', formId);
+
+            if (error) {
+                console.error('❌ delete form_blueprints failed', error);
+                // Optional: reuse saveError to surface something in UI
+                // setSaveError('Could not delete form.');
+                return;
+            }
+
+            // Success – close dialog and go back to list
+            setDeleteConfirm(false);
+            router.push('/form-builder');
+        } finally {
+            setIsDeleting(false);
+        }
+    };
+
 
     const addFieldFromType = (type: FieldType) => {
+        if (status === 'PUBLISHED') return;
         const field = createFieldFromType(type);
         setFields((prev) => [...prev, field]);
     };
@@ -728,6 +774,7 @@ export default function FullscreenFormBuilderPage() {
 
     const handleCanvasDrop = (event: DragEvent<HTMLDivElement>) => {
         event.preventDefault();
+        if (status === 'PUBLISHED') return;
         const type = event.dataTransfer.getData(
             'application/x-homeorbit-field-type'
         ) as FieldType | '';
@@ -736,6 +783,7 @@ export default function FullscreenFormBuilderPage() {
     };
 
     const handleRemoveField = (id: string) => {
+        if (status === 'PUBLISHED') return;
         setFields((prev) => prev.filter((f) => f.id !== id));
         setSelectedFieldIds((prev) => prev.filter((selId) => selId !== id));
     };
@@ -862,6 +910,7 @@ export default function FullscreenFormBuilderPage() {
 
     const handlePasteBelow = () => {
         if (!clipboard || clipboard.length === 0) return;
+        if (status === 'PUBLISHED') return;
 
         setFields((prev) => {
             const indices = selectedFieldIds
@@ -911,7 +960,7 @@ export default function FullscreenFormBuilderPage() {
                     style={{ borderColor: 'var(--ring)', background: 'var(--panel-bg)' }}
                 >
                     <p className="text-sm" style={{ color: 'var(--sub)' }}>
-                        Only admins can use the full-screen Form Builder.
+                        Managers and staff can’t use the full-screen Form Builder.
                     </p>
                 </div>
             </div>
@@ -1035,17 +1084,37 @@ export default function FullscreenFormBuilderPage() {
                             <span>Settings</span>
                         </button>
 
-                        {/* Publish */}
+                        {/* Publish / Unpublish */}
                         <button
                             type="button"
-                            onClick={handlePublish}
-                            className="px-3 py-1.5 text-xs md:text-sm rounded-md shadow-sm"
-                            style={{
-                                background: BRAND_GRADIENT,
-                                color: '#FFFFFF',
-                            }}
+                            onClick={isPublished ? handleUnpublish : handlePublish}
+                            disabled={isStatusChanging || !canAutoSave}
+                            className="px-3 py-1.5 text-xs md:text-sm rounded-md shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                            style={
+                                isPublished
+                                    ? {
+                                        background: 'rgba(127,29,29,0.18)',
+                                        color: '#fecaca',
+                                        borderColor: '#b91c1c',
+                                        borderWidth: 1,
+                                        borderStyle: 'solid',
+                                    }
+                                    : {
+                                        background: BRAND_GRADIENT,
+                                        color: '#FFFFFF',
+                                    }
+                            }
                         >
-                            Publish form
+                            {isStatusChanging ? (
+                                <span className="inline-flex items-center gap-2">
+                                    <span className="h-3 w-3 rounded-full border-[2px] border-current border-t-transparent animate-spin" />
+                                    {isPublished ? 'Unpublishing…' : 'Publishing…'}
+                                </span>
+                            ) : isPublished ? (
+                                'Unpublish form'
+                            ) : (
+                                'Publish form'
+                            )}
                         </button>
 
                         {/* Delete form */}
@@ -1067,13 +1136,14 @@ export default function FullscreenFormBuilderPage() {
                                 <button
                                     type="button"
                                     onClick={handleDeleteConfirm}
-                                    className="px-3 py-1.5 text-xs md:text-sm rounded-md"
+                                    disabled={isDeleting}
+                                    className="px-3 py-1.5 text-xs md:text-sm rounded-md disabled:opacity-60 disabled:cursor-not-allowed"
                                     style={{
                                         background: '#DC2626',
                                         color: '#FFFFFF',
                                     }}
                                 >
-                                    Confirm delete
+                                    {isDeleting ? 'Deleting…' : 'Confirm delete'}
                                 </button>
                                 <button
                                     type="button"
@@ -1288,19 +1358,24 @@ export default function FullscreenFormBuilderPage() {
                                                         <button
                                                             key={tool.type}
                                                             type="button"
-                                                            draggable
-                                                            onDragStart={(e) =>
-                                                                handleToolDragStart(
-                                                                    e,
-                                                                    tool.type
-                                                                )
+                                                            draggable={!isPublished}
+                                                            onDragStart={
+                                                                isPublished
+                                                                    ? undefined
+                                                                    : (e) => handleToolDragStart(e, tool.type)
                                                             }
-                                                            onClick={() =>
-                                                                addFieldFromType(
-                                                                    tool.type
-                                                                )
+                                                            onClick={() => {
+                                                                if (!isPublished) {
+                                                                    addFieldFromType(tool.type);
+                                                                }
+                                                            }}
+                                                            disabled={isPublished}
+                                                            className={
+                                                                'w-full flex items-start gap-2 rounded-lg px-2 py-2 text-left ring-1 transition-transform ' +
+                                                                (isPublished
+                                                                    ? 'opacity-60 cursor-not-allowed'
+                                                                    : 'cursor-grab active:cursor-grabbing hover:-translate-y-[1px] hover:shadow-sm')
                                                             }
-                                                            className="w-full flex items-start gap-2 rounded-lg px-2 py-2 text-left ring-1 cursor-grab active:cursor-grabbing transition-transform hover:-translate-y-[1px] hover:shadow-sm"
                                                             style={{
                                                                 background:
                                                                     'var(--nav-item-bg)',
@@ -1375,10 +1450,12 @@ export default function FullscreenFormBuilderPage() {
                                                         type="text"
                                                         value={formName}
                                                         onChange={(e) => {
+                                                            if (isPublished) return;
                                                             setFormName(e.target.value);
                                                             setShowExitWarning(false);
                                                         }}
-                                                        className="w-full rounded-md px-2 py-2 text-sm ring-1"
+                                                        disabled={isPublished}
+                                                        className="w-full rounded-md px-2 py-2 text-sm ring-1 disabled:opacity-60 disabled:cursor-not-allowed"
                                                         style={{
                                                             background: 'var(--nav-item-bg)',
                                                             color: 'var(--ink)',
@@ -1399,11 +1476,13 @@ export default function FullscreenFormBuilderPage() {
                                                         <select
                                                             value={companyId ?? ''}
                                                             onChange={(e) => {
+                                                                if (isPublished) return;
                                                                 const val = e.target.value || null;
                                                                 setCompanyId(val);
                                                                 setShowExitWarning(false);
                                                             }}
-                                                            className="w-full rounded-md px-2 py-2 text-sm ring-1"
+                                                            disabled={isPublished}
+                                                            className="w-full rounded-md px-2 py-2 text-sm ring-1 disabled:opacity-60 disabled:cursor-not-allowed"
                                                             style={{
                                                                 background: 'var(--nav-item-bg)',
                                                                 color: 'var(--ink)',
@@ -1430,11 +1509,13 @@ export default function FullscreenFormBuilderPage() {
                                                     <select
                                                         value={formHead || ''}
                                                         onChange={(e) => {
+                                                            if (isPublished) return;
                                                             const val = e.target.value as HeadKey | '';
                                                             setFormHead(val);
                                                             setShowExitWarning(false);
                                                         }}
-                                                        className="w-full rounded-md px-2 py-2 text-sm ring-1"
+                                                        disabled={isPublished}
+                                                        className="w-full rounded-md px-2 py-2 text-sm ring-1 disabled:opacity-60 disabled:cursor-not-allowed"
                                                         style={{
                                                             background: 'var(--nav-item-bg)',
                                                             color: 'var(--ink)',
@@ -1507,14 +1588,15 @@ export default function FullscreenFormBuilderPage() {
                                             >
                                                 Copy
                                             </button>
-                                            <button
-                                                type="button"
-                                                onClick={handlePasteBelow}
-                                                disabled={
-                                                    !clipboard ||
-                                                    clipboard.length === 0
-                                                }
-                                                className="px-2 py-1 rounded-md ring-1 disabled:opacity-60"
+                                                <button
+                                                    type="button"
+                                                    onClick={handlePasteBelow}
+                                                    disabled={
+                                                        !clipboard ||
+                                                        clipboard.length === 0 ||
+                                                        isPublished
+                                                    }
+                                                    className="px-2 py-1 rounded-md ring-1 disabled:opacity-60 disabled:cursor-not-allowed"
                                                 style={{
                                                     background:
                                                         clipboard &&
