@@ -279,6 +279,41 @@ export default function PayslipsPage() {
         URL.revokeObjectURL(url);
     }
 
+    async function notifyPayslipUploaded(params: {
+        userId: string;
+        companyId: string;
+        selHome: string;
+        year: number;
+        monthLabel: string;
+    }) {
+        const { userId, companyId, selHome, year, monthLabel } = params;
+
+        // Map special "home" values to a nullable home_id
+        const homeId =
+            selHome === BANK_OPTION || selHome === COMPANY_OPTION
+                ? null
+                : selHome || null;
+
+        // Adjust fields here to match your notifications schema
+        const { error } = await supabase.from('notifications').insert({
+            user_id: userId,
+            company_id: companyId,
+            home_id: homeId,
+            // optional extras, depending on your table:
+            kind: 'PAYSLIP',                          // if you have a "kind" column
+            title: 'New payslip uploaded',
+            body: `Your ${monthLabel} payslip has been uploaded for ${year}.`,
+            link_path: '/payslips',                   // if you store a link/URL
+        });
+
+        if (error) {
+            // Don't block the UI if notification fails – just log it
+            // eslint-disable-next-line no-console
+            console.error('Failed to insert payslip notification', error);
+        }
+    }
+
+
     async function handleSubmit(e: React.FormEvent) {
         e.preventDefault();
         if (!file && !existing) return;
@@ -332,6 +367,16 @@ export default function PayslipsPage() {
 
                 setExisting(link.data as Payslip);
                 setFile(null);
+
+                // 🔔 Notify the staff member that their payslip is ready
+                // (fire-and-forget; failures are logged inside the helper)
+                void notifyPayslipUploaded({
+                    userId: selUser,
+                    companyId: selCompany,
+                    selHome,
+                    year,
+                    monthLabel,
+                });
             }
 
             setMsg({ type: 'success', text: 'Payslip uploaded.' });

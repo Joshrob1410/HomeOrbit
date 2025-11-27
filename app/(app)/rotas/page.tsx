@@ -398,7 +398,7 @@ function TabBtn(
 function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
     isAdmin: boolean; isCompany: boolean; isManager: boolean; isStaff: boolean;
 }) {
-    // local helper just for this component
+    // local helpers just for this component
     const hhmmLocal = (t?: string | null) => (t ? t.slice(0, 5) : null);
     const endTimeFromLocal = (startHHMM: string, hours: number) => {
         const [H, M] = startHHMM.split(':').map(n => parseInt(n, 10));
@@ -413,6 +413,26 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
     };
 
     type EntryWithStart = Entry & { start_time?: string | null }; // adds start_time safely
+
+    type RotaChange = {
+        day_of_month: number;
+        user_id: string;
+        change_type: 'ADDED' | 'REMOVED' | 'CHANGED';
+
+        before_shift_code: string | null;
+        after_shift_code: string | null;
+
+        before_hours: number | null;
+        after_hours: number | null;
+
+        before_start_time: string | null; // 'HH:MM:SS' or 'HH:MM'
+        after_start_time: string | null;
+
+        before_notes: string | null;
+        after_notes: string | null;
+    };
+
+    type RotaChangeRow = RotaChange;
 
     const [uid, setUid] = useState<string>('');
 
@@ -430,6 +450,16 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
     const [rota, setRota] = useState<Rota | null>(null);
     const [entries, setEntries] = useState<EntryWithStart[]>([]);
     const [people, setPeople] = useState<Profile[]>([]);
+    const [changes, setChanges] = useState<RotaChange[]>([]);
+
+    // Quick lookup map: "day:user" -> full change object
+    const changeMap = useMemo(() => {
+        const m = new Map<string, RotaChange>();
+        for (const c of changes) {
+            m.set(`${c.day_of_month}:${c.user_id}`, c);
+        }
+        return m;
+    }, [changes]);
 
     // Bank view (across homes) extras
     const [bankEntries, setBankEntries] = useState<(EntryWithStart & { _home_id?: string })[]>([]);
@@ -456,7 +486,7 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
 
             if (isAdmin) {
                 const co = await supabase.from('companies').select('id,name').order('name');
-                const items = (co.data ?? []) as { id: string; name: string }[];
+                const items = (co.data ?? []) as Company[];
                 setCompanies(items);
             }
 
@@ -513,24 +543,53 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
     /* ---------- STANDARD VIEW: Live rota for selected home ---------- */
     useEffect(() => {
         (async () => {
-            setRota(null); setEntries([]); setPeople([]);
+            setRota(null);
+            setEntries([]);
+            setPeople([]);
+            setChanges([]); // clear any previous diff
+
             if (!homeId || !month) return;
 
-            const r = await supabase.from('rotas').select('*')
-                .eq('home_id', homeId).eq('month_date', month).eq('status', 'LIVE').maybeSingle();
-            setRota((r.data as Rota) || null);
-            if (!r.data) return;
+            const r = await supabase
+                .from('rotas')
+                .select('*')
+                .eq('home_id', homeId)
+                .eq('month_date', month)
+                .eq('status', 'LIVE')
+                .maybeSingle();
 
-            const e = await supabase.from('rota_entries').select('*').eq('rota_id', (r.data as Rota).id);
-            const rows = (e.data ?? []) as Entry[];
+            const rotaRow = (r.data as Rota) || null;
+            setRota(rotaRow);
+            if (!rotaRow) return;
+
+            const e = await supabase
+                .from('rota_entries')
+                .select('*')
+                .eq('rota_id', rotaRow.id);
+
+            const rows = (e.data ?? []) as EntryWithStart[];
             setEntries(rows);
 
             const ids = viewMode === 'MINE'
                 ? [uid]
                 : Array.from(new Set(rows.map(x => x.user_id)));
+
             if (ids.length) {
-                const prof = await supabase.from('profiles').select('user_id, full_name').in('user_id', ids);
+                const prof = await supabase
+                    .from('profiles')
+                    .select('user_id, full_name')
+                    .in('user_id', ids);
                 setPeople((prof.data ?? []) as Profile[]);
+            }
+
+            // load changes vs previous LIVE version (if any)
+            const { data: diffRows, error: diffError } = await supabase
+                .rpc('rota_changes_since_previous', {
+                    p_rota_id: rotaRow.id,
+                });
+
+            if (!diffError && Array.isArray(diffRows)) {
+                setChanges(diffRows as RotaChange[]);
             }
         })();
     }, [homeId, month, viewMode, uid]);
@@ -538,7 +597,8 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
     /* ---------- BANK VIEW: my shifts across ALL homes (LIVE rotas in month) ---------- */
     useEffect(() => {
         (async () => {
-            setBankEntries([]); setHomeById(new Map());
+            setBankEntries([]);
+            setHomeById(new Map());
             const isBankView = !homeId;
             if (!isBankView || !uid || !month) return;
 
@@ -567,7 +627,7 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
                     start_time: row.start_time,
                     _home_id: row.rotas?.home_id,
                 };
-            }) as (Entry & { _home_id?: string })[];
+            }) as (EntryWithStart & { _home_id?: string })[];
 
             setBankEntries(rows);
 
@@ -672,26 +732,153 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
                         cellRenderer={(d) => {
                             const todays = entries.filter(e => e.day_of_month === d);
                             const visible = viewMode === 'MINE' ? todays.filter(e => e.user_id === uid) : todays;
+
+                            // For "My shifts" we can show removed info where there is no current entry
+                            const removedForMe =
+                                viewMode === 'MINE'
+                                    ? changes.filter(
+                                        c =>
+                                            c.day_of_month === d &&
+                                            c.user_id === uid &&
+                                            c.change_type === 'REMOVED'
+                                    )
+                                    : [];
+
                             return (
                                 <div className="space-y-1">
-                                    {visible.length === 0 ? (
+                                    {/* If no visible entries but something was removed for me */}
+                                    {visible.length === 0 && removedForMe.length > 0 && (
+                                        <>
+                                            {removedForMe.map((c, idx) => {
+                                                const fromTime = c.before_start_time
+                                                    ? hhmmLocal(c.before_start_time)
+                                                    : null;
+                                                const fromHours = c.before_hours ?? null;
+
+                                                return (
+                                                    <div
+                                                        key={`removed-${idx}`}
+                                                        className="rounded-lg px-2 py-1 border text-[12px]"
+                                                        style={{
+                                                            background: 'var(--nav-item-bg)',
+                                                            borderColor: '#DC2626',
+                                                            color: 'var(--ink)',
+                                                        }}
+                                                        title={
+                                                            fromTime || fromHours
+                                                                ? `Previously: ${c.before_shift_code ?? 'Shift'} · ${fromTime ? `${fromTime}` : ''
+                                                                }${fromHours ? ` · ${fromHours}h` : ''
+                                                                }`
+                                                                : 'Shift removed since last rota'
+                                                        }
+                                                    >
+                                                        <div className="font-semibold text-[11px]" style={{ color: '#DC2626' }}>
+                                                            Shift removed since last rota
+                                                        </div>
+                                                        {c.before_shift_code && (
+                                                            <div className="mt-0.5 text-[11px]" style={{ color: 'var(--sub)' }}>
+                                                                Was: {c.before_shift_code}
+                                                                {fromTime && ` · ${fromTime}`}
+                                                                {fromHours && ` · ${fromHours}h`}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </>
+                                    )}
+
+                                    {/* If no entries and no removed info, just show dash */}
+                                    {visible.length === 0 && removedForMe.length === 0 && (
                                         <div className="text-xs" style={{ color: 'var(--sub)' }}>—</div>
-                                    ) : visible.map(e => {
+                                    )}
+
+                                    {visible.map(e => {
                                         const { bg, border, fg } = colorFor(e.user_id, isDark);
                                         const code = e.shift_type_id ? codeById.get(e.shift_type_id) : undefined;
                                         const inits = initialsFor(people, e.user_id);
+
+                                        const change = changeMap.get(`${d}:${e.user_id}`);
+                                        const changeType = change?.change_type;
+
+                                        const overrideBorder =
+                                            changeType === 'ADDED'
+                                                ? '#16A34A'
+                                                : changeType === 'CHANGED'
+                                                    ? '#F97316'
+                                                    : undefined;
+
+                                        const changeSummary =
+                                            change && change.change_type === 'CHANGED'
+                                                ? (() => {
+                                                    const bits: string[] = [];
+
+                                                    if (change.before_shift_code !== change.after_shift_code) {
+                                                        bits.push(
+                                                            `Shift ${change.before_shift_code ?? '—'} → ${change.after_shift_code ?? '—'}`
+                                                        );
+                                                    }
+
+                                                    if (
+                                                        (change.before_start_time ?? '') !==
+                                                        (change.after_start_time ?? '')
+                                                    ) {
+                                                        const from = change.before_start_time
+                                                            ? hhmmLocal(change.before_start_time)
+                                                            : null;
+                                                        const to = change.after_start_time
+                                                            ? hhmmLocal(change.after_start_time)
+                                                            : null;
+                                                        bits.push(
+                                                            `Time ${from ?? '—'} → ${to ?? '—'}`
+                                                        );
+                                                    }
+
+                                                    if (
+                                                        (change.before_hours ?? 0) !==
+                                                        (change.after_hours ?? 0)
+                                                    ) {
+                                                        bits.push(
+                                                            `Hours ${change.before_hours ?? 0} → ${change.after_hours ?? 0}`
+                                                        );
+                                                    }
+
+                                                    if (
+                                                        (change.before_notes ?? '') !==
+                                                        (change.after_notes ?? '')
+                                                    ) {
+                                                        bits.push('Notes updated');
+                                                    }
+
+                                                    return bits.join(' · ');
+                                                })()
+                                                : '';
+
                                         const titleText = (() => {
                                             const full = displayName(people, e.user_id);
                                             const s = hhmmLocal(e.start_time ?? null);
-                                            if (!s) return full;
-                                            const { end, nextDay } = endTimeFromLocal(s, e.hours || 0);
-                                            return `${full} · ${s}–${end}${nextDay ? ' (+1d)' : ''}`;
+                                            const { end, nextDay } = s
+                                                ? endTimeFromLocal(s, e.hours || 0)
+                                                : { end: '', nextDay: false };
+
+                                            let base = full;
+                                            if (s) base += ` · ${s}–${end}${nextDay ? ' (+1d)' : ''}`;
+                                            if (changeSummary) base += `\nChange: ${changeSummary}`;
+                                            return base;
                                         })();
+
                                         return (
                                             <div
                                                 key={e.id}
                                                 className="rounded-lg px-2 py-1"
-                                                style={{ background: bg, border: `1px solid ${border}`, color: fg }}
+                                                style={{
+                                                    background: bg,
+                                                    border: `1px solid ${overrideBorder ?? border}`,
+                                                    color: fg,
+                                                    boxShadow: changeType
+                                                        ? `0 0 0 1px ${overrideBorder ?? border}`
+                                                        : undefined,
+                                                }}
                                                 title={titleText}
                                             >
                                                 <div className="text-[12px] leading-tight truncate">
@@ -699,6 +886,29 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
                                                     {code && <> · <span className="font-mono">{code}</span></>}
                                                     <> · {e.hours}h</>
                                                 </div>
+
+                                                {changeType && (
+                                                    <div
+                                                        className="mt-0.5 text-[10px] font-medium uppercase tracking-wide"
+                                                        style={{
+                                                            color:
+                                                                changeType === 'ADDED'
+                                                                    ? '#16A34A'
+                                                                    : '#F97316',
+                                                        }}
+                                                    >
+                                                        {changeType === 'ADDED'
+                                                            ? 'New shift since last rota'
+                                                            : 'Updated since last rota'}
+                                                    </div>
+                                                )}
+
+                                                {changeType === 'CHANGED' && changeSummary && (
+                                                    <div className="mt-0.5 text-[11px]" style={{ color: 'var(--sub)' }}>
+                                                        {changeSummary}
+                                                    </div>
+                                                )}
+
                                                 {e.notes && (
                                                     <div className="mt-0.5 text-[11px] break-words" style={{ color: 'var(--sub)' }}>
                                                         {e.notes}
@@ -768,6 +978,7 @@ function MyRotas({ isAdmin, isCompany, isManager, isStaff }: {
         </div>
     );
 }
+
 
 /* ========= Utilities for KPIs ========= */
 

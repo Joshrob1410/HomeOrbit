@@ -2,7 +2,14 @@
 'use client';
 
 import Link from 'next/link';
-import { use, useEffect, useMemo, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import {
+    use,
+    useCallback,
+    useEffect,
+    useMemo,
+    useState,
+} from 'react';
 import { supabase } from '@/supabase/client';
 import { getEffectiveLevel, type AppLevel } from '@/supabase/roles';
 
@@ -172,10 +179,7 @@ function normaliseDefinition(definition: Json): RuntimeField[] {
         const required = Boolean(f.required);
 
         let options: { value: string; label: string }[] | undefined;
-        if (
-            type === 'SINGLE_SELECT' ||
-            type === 'MULTI_SELECT'
-        ) {
+        if (type === 'SINGLE_SELECT' || type === 'MULTI_SELECT') {
             const rawOpts = f.options;
             if (Array.isArray(rawOpts)) {
                 options = rawOpts
@@ -228,7 +232,10 @@ function formatDateTime(dateStr: string | null): string | null {
     return (
         d.toLocaleDateString() +
         ' ' +
-        d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        d.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+        })
     );
 }
 
@@ -252,14 +259,22 @@ function prettyEntryStatus(status: FormEntryStatus): string {
         case 'DRAFT':
             return 'Draft (in progress)';
         case 'SUBMITTED':
-            return 'Submitted';
+            return 'Submitted (pending approval)';
         case 'LOCKED':
-            return 'Locked';
+            return 'Locked / approved';
         case 'CANCELLED':
             return 'Cancelled';
         default:
             return status;
     }
+}
+
+function isEntryReadOnlyStatus(status: FormEntryStatus): boolean {
+    return (
+        status === 'SUBMITTED' ||
+        status === 'LOCKED' ||
+        status === 'CANCELLED'
+    );
 }
 
 /** ========= Page ========= */
@@ -271,9 +286,32 @@ export default function Page({
 }) {
     // ✅ New Next.js 15-style params: unwrap the Promise
     const { id, formEntryId } = use(params);
+    const router = useRouter();
+    const searchParams = useSearchParams();
 
     const [view, setView] = useState<ViewState>({ status: 'loading' });
     const [answers, setAnswers] = useState<AnswersObject>({});
+    const [hasTouchedAnswers, setHasTouchedAnswers] = useState(false);
+
+    // Save state
+    const [isSaving, setIsSaving] = useState(false);
+    const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+    const [saveError, setSaveError] = useState<string | null>(null);
+
+    // Submit state
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [submitError, setSubmitError] = useState<string | null>(
+        null,
+    );
+    const [confirmingSubmit, setConfirmingSubmit] = useState(false);
+    const [confirmSeconds, setConfirmSeconds] = useState(3);
+
+    // Delete state (draft only)
+    const [isDeleting, setIsDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState<string | null>(
+        null,
+    );
+    const [confirmingDelete, setConfirmingDelete] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
@@ -369,7 +407,7 @@ export default function Page({
                 blueprint: bp,
             });
 
-            // Initialise answers state (blank {} by default)
+            // Initialise answers state
             const rawAnswers = entry.answers;
             if (
                 rawAnswers &&
@@ -380,6 +418,9 @@ export default function Page({
             } else {
                 setAnswers({});
             }
+            setHasTouchedAnswers(false);
+            setLastSavedAt(entry.updated_at ?? null);
+            setSaveError(null);
         })();
 
         return () => {
@@ -392,76 +433,341 @@ export default function Page({
         return normaliseDefinition(view.blueprint.definition);
     }, [view]);
 
-    /** ========= Guards ========= */
-    if (view.status === 'loading') {
-        return (
-            <div className="p-4 md:p-6" style={{ color: 'var(--sub)' }}>
-                Loading form…
-            </div>
-        );
-    }
-
-    if (view.status === 'signed_out') {
-        return null;
-    }
-
-    if (view.status === 'not_found') {
-        return (
-            <div className="p-4 md:p-6 space-y-4">
-                <div>
-                    <Link
-                        href={`/young-people/${id}`}
-                        className="text-xs hover:underline"
-                        style={{ color: 'var(--sub)' }}
-                    >
-                        ← Back to young person
-                    </Link>
-                </div>
-                <div
-                    className="rounded-xl p-4 md:p-5 ring-1"
-                    style={{
-                        background: 'var(--card-grad)',
-                        borderColor: 'var(--ring)',
-                        color: 'var(--ink)',
-                    }}
-                >
-                    <h1 className="text-lg md:text-xl font-semibold mb-1">
-                        Form not found
-                    </h1>
-                    <p className="text-sm" style={{ color: 'var(--sub)' }}>
-                        This form either doesn&apos;t exist anymore or you
-                        don&apos;t have permission to view it.
-                    </p>
-                </div>
-            </div>
-        );
-    }
-
-    const { youngPerson, entry, blueprint } = view;
-
-    const startedLabel = formatDateTime(entry.created_at);
-    const submittedLabel = formatDateTime(entry.submitted_at);
-    const dobLabel = youngPerson.date_of_birth
-        ? new Date(youngPerson.date_of_birth).toLocaleDateString()
-        : null;
-    const ageLabel = calculateAge(youngPerson.date_of_birth);
-    const statusLabel = prettyEntryStatus(entry.status);
-    const templateUpdatedLabel = blueprint.updated_at
-        ? new Date(blueprint.updated_at).toLocaleDateString()
-        : null;
-
+    // Derived entry info for editing / headers
+    const entryId = view.status === 'ready' ? view.entry.id : null;
+    const entryStatus: FormEntryStatus | null =
+        view.status === 'ready' ? view.entry.status : null;
     const isReadOnly =
-        entry.status === 'SUBMITTED' ||
-        entry.status === 'LOCKED' ||
-        entry.status === 'CANCELLED';
+        entryStatus == null ? true : isEntryReadOnlyStatus(entryStatus);
+    const canEdit = Boolean(entryId && !isReadOnly);
 
-    /** ========= Render helpers ========= */
+    const canDeleteDraft =
+        Boolean(entryId) && entryStatus === 'DRAFT' && !isReadOnly;
+
+    // Decide where "back" should go, based on ?from=
+    const getBackHref = () => {
+        const fromParam = searchParams.get('from');
+        if (fromParam === 'drafts') return '/drafts';
+        if (fromParam === 'pending-approval') return '/pending-approval';
+        if (view.status === 'ready') {
+            return `/young-people/${view.youngPerson.id}`;
+        }
+        return '/young-people';
+    };
+
+    /** ========= Auto-save (2s debounce) ========= */
+
+    const autoSaveDraft = useCallback(async () => {
+        if (!entryId || !canEdit) return;
+        setIsSaving(true);
+        setSaveError(null);
+
+        try {
+            const { data: s } = await supabase.auth.getSession();
+            const accessToken = s?.session?.access_token;
+
+            if (!accessToken) {
+                setSaveError('You are not signed in.');
+                setIsSaving(false);
+                return;
+            }
+
+            const res = await fetch('/api/forms/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                    entryId,
+                    answers,
+                }),
+            });
+
+            let json: unknown = null;
+            try {
+                json = await res.json();
+            } catch {
+                json = null;
+            }
+
+            if (!res.ok) {
+                let msg =
+                    'Could not save your changes. They are still on this page, but may not be stored.';
+                if (
+                    json &&
+                    typeof json === 'object' &&
+                    'error' in json
+                ) {
+                    const errVal = (json as Record<string, unknown>)
+                        .error;
+                    if (typeof errVal === 'string') msg = errVal;
+                }
+                setSaveError(msg);
+            } else {
+                const updatedAt =
+                    json &&
+                        typeof json === 'object' &&
+                        'updatedAt' in json &&
+                        typeof (json as Record<string, unknown>)
+                            .updatedAt === 'string'
+                        ? (json as Record<string, string>).updatedAt
+                        : new Date().toISOString();
+                setLastSavedAt(updatedAt);
+                setSaveError(null);
+            }
+        } catch (err) {
+            console.error('❌ autoSaveDraft failed', err);
+            setSaveError(
+                'Unexpected error while saving. Please check your connection.',
+            );
+        } finally {
+            setIsSaving(false);
+        }
+    }, [entryId, canEdit, answers]);
+
+    useEffect(() => {
+        if (!canEdit) return;
+        if (!hasTouchedAnswers) return;
+
+        const timeout = window.setTimeout(() => {
+            void autoSaveDraft();
+        }, 2000);
+
+        return () => {
+            window.clearTimeout(timeout);
+        };
+    }, [answers, hasTouchedAnswers, canEdit, autoSaveDraft]);
+
+    /** ========= Explicit save + submit handlers ========= */
+
+    const handleSaveClick = async () => {
+        if (!canEdit) return;
+        await autoSaveDraft();
+    };
+
+    const handleExitClick = async () => {
+        if (canEdit && hasTouchedAnswers) {
+            await autoSaveDraft();
+        }
+        const backHref = getBackHref();
+        router.push(backHref);
+    };
+
+    const doSubmit = useCallback(async () => {
+        if (!entryId || !canEdit) return;
+        setIsSubmitting(true);
+        setSubmitError(null);
+
+        try {
+            const { data: s } = await supabase.auth.getSession();
+            const accessToken = s?.session?.access_token;
+
+            if (!accessToken) {
+                setSubmitError('You are not signed in.');
+                setIsSubmitting(false);
+                return;
+            }
+
+            const res = await fetch('/api/forms/submit', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                    entryId,
+                    answers,
+                }),
+            });
+
+            let json: unknown = null;
+            try {
+                json = await res.json();
+            } catch {
+                json = null;
+            }
+
+            if (!res.ok) {
+                let msg =
+                    'Something went wrong while submitting this form.';
+                if (
+                    json &&
+                    typeof json === 'object' &&
+                    'error' in json
+                ) {
+                    const errVal = (json as Record<string, unknown>)
+                        .error;
+                    if (typeof errVal === 'string') msg = errVal;
+                }
+                setSubmitError(msg);
+                setIsSubmitting(false);
+                return;
+            }
+
+            let nextStatus: FormEntryStatus = 'SUBMITTED';
+            let submittedAt: string | null = null;
+
+            if (json && typeof json === 'object') {
+                const rec = json as Record<string, unknown>;
+                if (
+                    typeof rec.status === 'string' &&
+                    (
+                        [
+                            'DRAFT',
+                            'SUBMITTED',
+                            'LOCKED',
+                            'CANCELLED',
+                        ] as string[]
+                    ).includes(rec.status)
+                ) {
+                    nextStatus = rec.status as FormEntryStatus;
+                }
+                if (typeof rec.submittedAt === 'string') {
+                    submittedAt = rec.submittedAt;
+                }
+            }
+
+            // Update view.entry locally
+            setView((prev) => {
+                if (prev.status !== 'ready') return prev;
+                if (prev.entry.id !== entryId) return prev;
+                return {
+                    ...prev,
+                    entry: {
+                        ...prev.entry,
+                        status: nextStatus,
+                        submitted_at: submittedAt,
+                    },
+                };
+            });
+        } catch (err) {
+            console.error('❌ doSubmit failed', err);
+            setSubmitError(
+                'Unexpected error while submitting. Please try again.',
+            );
+        } finally {
+            setIsSubmitting(false);
+        }
+    }, [entryId, canEdit, answers]);
+
+    // Manage the 3-second confirmation window
+    useEffect(() => {
+        if (!confirmingSubmit) return;
+        if (!canEdit) {
+            setConfirmingSubmit(false);
+            return;
+        }
+
+        setConfirmSeconds(3);
+
+        const intervalId = window.setInterval(() => {
+            setConfirmSeconds((prev) => {
+                if (prev <= 1) return 1;
+                return prev - 1;
+            });
+        }, 1000);
+
+        const timeoutId = window.setTimeout(() => {
+            window.clearInterval(intervalId);
+            setConfirmingSubmit(false);
+            void doSubmit();
+        }, 3000);
+
+        return () => {
+            window.clearInterval(intervalId);
+            window.clearTimeout(timeoutId);
+        };
+    }, [confirmingSubmit, canEdit, doSubmit]);
+
+    const handleSubmitClick = () => {
+        if (!canEdit || isSubmitting) return;
+
+        // Second click within the countdown cancels
+        if (confirmingSubmit) {
+            setConfirmingSubmit(false);
+            setConfirmSeconds(3);
+            return;
+        }
+
+        setSubmitError(null);
+        setConfirmingSubmit(true);
+        setConfirmSeconds(3);
+    };
+
+    const handleDeleteClick = async () => {
+        if (!canDeleteDraft || !entryId) return;
+
+        // First click just arms the delete
+        if (!confirmingDelete) {
+            setDeleteError(null);
+            setConfirmingDelete(true);
+            return;
+        }
+
+        setIsDeleting(true);
+        setDeleteError(null);
+
+        try {
+            const { data: s } = await supabase.auth.getSession();
+            const accessToken = s?.session?.access_token;
+
+            if (!accessToken) {
+                setDeleteError('You are not signed in.');
+                setIsDeleting(false);
+                setConfirmingDelete(false);
+                return;
+            }
+
+            const res = await fetch('/api/forms/delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({ entryId }),
+            });
+
+            let json: unknown = null;
+            try {
+                json = await res.json();
+            } catch {
+                json = null;
+            }
+
+            if (!res.ok) {
+                let msg = 'Could not delete this draft.';
+                if (json && typeof json === 'object' && 'error' in json) {
+                    const errVal = (json as Record<string, unknown>)
+                        .error;
+                    if (typeof errVal === 'string') msg = errVal;
+                }
+                setDeleteError(msg);
+                setIsDeleting(false);
+                setConfirmingDelete(false);
+                return;
+            }
+
+            const backHref = getBackHref();
+            setIsDeleting(false);
+            setConfirmingDelete(false);
+            router.push(backHref);
+        } catch (err) {
+            console.error('❌ handleDeleteClick failed', err);
+            setDeleteError(
+                'Unexpected error while deleting. Please try again.',
+            );
+            setIsDeleting(false);
+            setConfirmingDelete(false);
+        }
+    };
 
     const handleFieldChange = (
         field: RuntimeField,
         value: string | string[],
     ) => {
-        if (isReadOnly) return;
+        if (!canEdit) return;
+        setHasTouchedAnswers(true);
         setAnswers((prev) => ({
             ...prev,
             [field.key]: Array.isArray(value) ? value : value ?? '',
@@ -696,16 +1002,119 @@ export default function Page({
         return null;
     };
 
+    /** ========= Guards ========= */
+    if (view.status === 'loading') {
+        return (
+            <div className="p-4 md:p-6" style={{ color: 'var(--sub)' }}>
+                Loading form…
+            </div>
+        );
+    }
+
+    if (view.status === 'signed_out') {
+        return null;
+    }
+
+    if (view.status === 'not_found') {
+        return (
+            <div className="p-4 md:p-6 space-y-4">
+                <div>
+                    <Link
+                        href={getBackHref()}
+                        className="text-xs hover:underline"
+                        style={{ color: 'var(--sub)' }}
+                    >
+                        ← Back
+                    </Link>
+                </div>
+                <div
+                    className="rounded-xl p-4 md:p-5 ring-1"
+                    style={{
+                        background: 'var(--card-grad)',
+                        borderColor: 'var(--ring)',
+                        color: 'var(--ink)',
+                    }}
+                >
+                    <h1 className="text-lg md:text-xl font-semibold mb-1">
+                        Form not found
+                    </h1>
+                    <p
+                        className="text-sm"
+                        style={{ color: 'var(--sub)' }}
+                    >
+                        This form either doesn&apos;t exist anymore or you
+                        don&apos;t have permission to view it.
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    const { youngPerson, entry, blueprint } = view;
+
+    const startedLabel = formatDateTime(entry.created_at);
+    const submittedLabel = formatDateTime(entry.submitted_at);
+    const dobLabel = youngPerson.date_of_birth
+        ? new Date(youngPerson.date_of_birth).toLocaleDateString()
+        : null;
+    const ageLabel = calculateAge(youngPerson.date_of_birth);
+    const statusLabel = prettyEntryStatus(entry.status);
+    const templateUpdatedLabel = blueprint.updated_at
+        ? new Date(blueprint.updated_at).toLocaleDateString()
+        : null;
+
+    const saveBadgeLabel = (() => {
+        if (isReadOnly) return 'Read-only (submitted / locked)';
+        if (isSaving) return 'Saving…';
+        if (lastSavedAt) {
+            const d = new Date(lastSavedAt);
+            if (!Number.isNaN(d.getTime())) {
+                return `Saved ${d.toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                })}`;
+            }
+            return 'Saved';
+        }
+        return 'Auto-save on';
+    })();
+
+    const submitButtonLabel = (() => {
+        if (isReadOnly) return 'Already submitted';
+        if (isSubmitting) return 'Submitting…';
+        if (confirmingSubmit)
+            return `Submitting in ${confirmSeconds}s – click to cancel`;
+        return 'Submit';
+    })();
+
+    const deleteButtonLabel = (() => {
+        if (!canDeleteDraft) return 'Delete draft';
+        if (isDeleting) return 'Deleting…';
+        if (confirmingDelete) return 'Click again to delete';
+        return 'Delete draft';
+    })();
+
+    const fromParam = searchParams.get('from');
+    const backHref = getBackHref();
+    const backLabel =
+        fromParam === 'drafts'
+            ? '← Back to drafts'
+            : fromParam === 'pending-approval'
+                ? '← Back to pending approvals'
+                : `← Back to ${youngPerson.full_name}`;
+
+    /** ========= Render ========= */
+
     return (
         <div className="p-4 md:p-6 space-y-6">
             {/* Back link */}
             <div>
                 <Link
-                    href={`/young-people/${youngPerson.id}`}
+                    href={backHref}
                     className="text-xs hover:underline"
                     style={{ color: 'var(--sub)' }}
                 >
-                    ← Back to {youngPerson.full_name}
+                    {backLabel}
                 </Link>
             </div>
 
@@ -777,7 +1186,8 @@ export default function Page({
                                         color: 'var(--sub)',
                                     }}
                                 >
-                                    Template updated {templateUpdatedLabel}
+                                    Template updated{' '}
+                                    {templateUpdatedLabel}
                                 </span>
                             )}
                         </div>
@@ -852,11 +1262,18 @@ export default function Page({
                             color: 'var(--sub)',
                         }}
                     >
-                        {isReadOnly
-                            ? 'Read-only (submitted/locked)'
-                            : 'Draft – not yet wired to saving'}
+                        {saveBadgeLabel}
                     </span>
                 </div>
+
+                {saveError && (
+                    <p
+                        className="text-xs"
+                        style={{ color: '#F97373' }}
+                    >
+                        {saveError}
+                    </p>
+                )}
 
                 {runtimeFields.length === 0 ? (
                     <p className="text-sm" style={{ color: 'var(--sub)' }}>
@@ -869,6 +1286,86 @@ export default function Page({
                         {runtimeFields.map((field) => renderField(field))}
                     </div>
                 )}
+
+                {/* Actions */}
+                <div
+                    className="pt-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-t mt-2"
+                    style={{ borderColor: 'var(--ring)' }}
+                >
+                    <div className="flex flex-wrap gap-2">
+                        {canDeleteDraft && (
+                            <button
+                                type="button"
+                                onClick={handleDeleteClick}
+                                disabled={isDeleting}
+                                className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs md:text-sm ring-1 disabled:opacity-60"
+                                style={{
+                                    borderColor: '#F97373',
+                                    background: confirmingDelete
+                                        ? '#2b0b0f'
+                                        : 'transparent',
+                                    color: '#F97373',
+                                }}
+                            >
+                                {deleteButtonLabel}
+                            </button>
+                        )}
+
+                        <button
+                            type="button"
+                            onClick={handleExitClick}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs md:text-sm ring-1"
+                            style={{
+                                borderColor: 'var(--ring)',
+                                background: 'var(--nav-item-bg)',
+                                color: 'var(--ink)',
+                            }}
+                        >
+                            Exit form
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={handleSaveClick}
+                            disabled={!canEdit || isSaving}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs md:text-sm ring-1 disabled:opacity-60"
+                            style={{
+                                borderColor: 'var(--ring)',
+                                background: 'var(--nav-item-bg)',
+                                color: 'var(--ink)',
+                            }}
+                        >
+                            {isSaving ? 'Saving…' : 'Save draft'}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={handleSubmitClick}
+                            disabled={!canEdit || isSubmitting}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs md:text-sm font-medium shadow-sm disabled:opacity-60"
+                            style={{
+                                background: isReadOnly
+                                    ? 'var(--nav-item-bg)'
+                                    : BRAND_GRADIENT,
+                                color: isReadOnly
+                                    ? 'var(--sub)'
+                                    : '#FFFFFF',
+                                borderColor: 'transparent',
+                            }}
+                        >
+                            {submitButtonLabel}
+                        </button>
+                    </div>
+
+                    {(submitError || deleteError) && (
+                        <p
+                            className="text-xs md:text-[11px]"
+                            style={{ color: '#F97373' }}
+                        >
+                            {submitError || deleteError}
+                        </p>
+                    )}
+                </div>
             </div>
 
             {/* Orbit-friendly tweaks */}
